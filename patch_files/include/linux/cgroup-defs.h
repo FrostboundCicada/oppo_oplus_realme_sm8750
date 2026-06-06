@@ -112,5 +112,3 @@ static inline struct list_head *cgroup_e_csets_ptr(struct cgroup *cgrp, int ssid
         return &cgrp->ext->e_csets[css_set_ext_index(ssid)];
     return &cgrp->e_csets_main[ssid];
 }
-
-#endif /* _LINUX_CGROUP_DEFS_BACKPORT_H */
