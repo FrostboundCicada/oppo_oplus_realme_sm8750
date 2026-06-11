@@ -1,4 +1,4 @@
-name: 6.6.89 欧加真OKI内核构建
+name: 6.6.89 欧加真OKI内核快速构建
 
 env:
   TZ: Asia/Shanghai
@@ -468,14 +468,13 @@ jobs:
             # 应用 Droidspaces 容器必须补丁
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_sysvipc_kabi_6_7_8.patch
             patch -p1 -F 3 < fix_sysvipc_kabi_6_7_8.patch || true
-            # 修补 oplus_bsp_midas 行为，避免开机崩溃
-            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
+            # 修补 oplus_bsp_midas
+            wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
 patch -p1 -F 3 < fix_oplus_bsp_midas.patch
 
             # 修补 ddl hit hook
             wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/ddl_hit_hook.patch
 patch -p1 -F 3 < ddl_hit_hook.patch
-
             # 应用 NTSync 补丁
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
@@ -546,7 +545,7 @@ patch -p1 -F 3 < ddl_hit_hook.patch
             for f in ./common/scripts/setlocalversion; do
               sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" "$f"
             done
-            sudo sed -i 's/-4k/-${{ github.event.inputs.kernel_suffix }}/g' ./common/arch/arm64/configs/gki_defconfig
+            sudo sed -i 's/-4k/-${{ github.event.inputs.KERNEL_SUFFIX }}/g' ./common/arch/arm64/configs/gki_defconfig
           else
             echo "当前内核版本后缀：${{ env.KERNEL_NAME }}"
             for f in ./common/scripts/setlocalversion; do
