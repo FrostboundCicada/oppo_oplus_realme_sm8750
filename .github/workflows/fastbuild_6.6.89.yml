@@ -474,7 +474,7 @@ jobs:
 
             # 修补 ddl hit hook
             wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/ddl_hit_hook.patch
-patch -p1 -F 3 < ddl_hit_hook.patch
+            patch -p1 -F 3 < ddl_hit_hook.patch
             # 应用 NTSync 补丁
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
