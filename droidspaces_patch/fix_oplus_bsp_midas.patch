@@ -1,93 +1,111 @@
-From 0a6268bd4ab1e36b117af859532482c06fd80827 Mon Sep 17 00:00:00 2001
-From: fatalcoder524 <11532648+fatalcoder524@users.noreply.github.com>
-Date: Fri, 24 Apr 2026 19:07:41 +0530
-Subject: [PATCH] Return ghost task if task is null and is requested by
- oplus_bsp_midas
-
-Signed-off-by: fatalcoder524 <11532648+fatalcoder524@users.noreply.github.com>
----
- pid.c | 47 ++++++++++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 46 insertions(+), 1 deletion(-)
-
-diff --git a/kernel/pid.c b/kernel/pid.c
-index 0c5e545..c124afb 100644
---- a/kernel/pid.c
-+++ b/kernel/pid.c
-@@ -44,6 +44,9 @@
- #include <linux/idr.h>
- #include <net/sock.h>
- #include <uapi/linux/pidfd.h>
-+#include <linux/version.h>
-+#include <linux/refcount.h>
-+#include <linux/module.h>
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+index c26c993e57b1..0442dae4fb37 100644
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -59,6 +59,9 @@
+ #include <linux/codetag.h>
+ #include <linux/debugfs.h>
+ #include <linux/execmem.h>
++#include <linux/kallsyms.h>
++#include <linux/threads.h>
++#include <asm/patching.h>
+ #include <uapi/linux/module.h>
+ #include "internal.h"
  
- struct pid init_struct_pid = {
- 	.count		= REFCOUNT_INIT(1),
-@@ -89,6 +92,30 @@ struct pid_namespace init_pid_ns = {
- };
- EXPORT_SYMBOL_GPL(init_pid_ns);
+@@ -3236,6 +3239,87 @@ static int complete_formation(struct module *mod, struct load_info *info)
+ 	return err;
+ }
  
-+static struct task_struct ghost_task;
-+static bool ghost_task_ready = false;
++/*
++ * Patch oplus_bsp_sched_assist: update_ddl_hit_history
++ * Vendor module indexes ddl_sdata[PID_MAX_DEFAULT] by p->pid, but with
++ * PID namespaces pid can exceed PID_MAX_DEFAULT causing OOB access.
++ * Replace the function entry with a long jump to our bounds-checked version.
++ */
++struct ddl_sinfo_data_compat {
++	char	comm[TASK_COMM_LEN];
++	u64	hit;
++};
 +
-+#define set_task_usage(target, value) _Generic((target), \
-+	refcount_t: refcount_set, \
-+	atomic_t:   atomic_set    \
-+)(&(target), (value))
++static struct ddl_sinfo_data_compat *ddl_sdata_ptr;
 +
-+void __init init_ghost_task(void)
++void update_ddl_hit_history_new(struct task_struct *p)
 +{
-+	memcpy(&ghost_task, &init_task, sizeof(struct task_struct));
-+	
-+	strncpy(ghost_task.comm, "ghost-task-sentinel", TASK_COMM_LEN);
-+	ghost_task.pid = -1;
-+	ghost_task.tgid = -1;
++	struct ddl_sinfo_data_compat *entry;
 +
-+	set_task_usage(ghost_task.usage, 1000);
-+#ifdef CONFIG_REFCOUNT_FULL
-+	refcount_set(&ghost_task.refcount, 1000);
-+#endif
++	if (!p || !ddl_sdata_ptr || p->pid <= 0 || p->pid >= PID_MAX_DEFAULT)
++		return;
 +
-+	ghost_task_ready = true;
++	entry = &ddl_sdata_ptr[p->pid];
++	if (!entry->comm[0]
++			|| strncmp(p->comm, entry->comm, strlen(p->comm))) {
++		memset(entry, 0, sizeof(*entry));
++		strscpy(entry->comm, p->comm, TASK_COMM_LEN);
++	}
++	entry->hit++;
 +}
 +
- /*
-  * Note: disable interrupts while the pidmap_lock is held as an
-  * interrupt might come in and do read_lock(&tasklist_lock).
-@@ -422,7 +449,24 @@ struct task_struct *find_task_by_pid_ns(pid_t nr, struct pid_namespace *ns)
- 
- struct task_struct *find_task_by_vpid(pid_t vnr)
- {
--	return find_task_by_pid_ns(vnr, task_active_pid_ns(current));
-+	struct task_struct *task;
-+	struct module *mod;
-+	unsigned long caller_ip = _RET_IP_;
++static int patch_func_jump(unsigned long old_func, unsigned long new_func)
++{
++	/*
++	 * ARM64 trampoline (16 bytes, replaces first 4 instructions):
++	 *   LDR x16, [PC, #8]    ; 0x58000050
++	 *   BR  x16               ; 0xD61F0200
++	 *   .quad new_func        ; 8-byte absolute address
++	 *
++	 * Called at MODULE_STATE_COMING before module init, no CPU can be
++	 * executing the target, so _nosync is safe and avoids stop_machine.
++	 */
++	u32 insns[] = { 0x58000050, 0xD61F0200,
++			lower_32_bits(new_func), upper_32_bits(new_func) };
++	int i, ret;
 +
-+	task = find_task_by_pid_ns(vnr, task_active_pid_ns(current));
++	for (i = 0; i < 4; i++) {
++		ret = aarch64_insn_patch_text_nosync((void *)(old_func + i * 4),
++						     insns[i]);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
 +
-+	if (unlikely(!task)) {
-+		preempt_disable();
-+		mod = __module_address(caller_ip);
-+		
-+		if (mod && strcmp(mod->name, "oplus_bsp_midas") == 0) {
-+			preempt_enable();
-+			return ghost_task_ready ? &ghost_task : &init_task;
-+		}
-+		preempt_enable();
++static void hook_sched_assist_module(struct module *mod)
++{
++	unsigned long old_func;
++
++	if (strcmp(mod->name, "oplus_bsp_sched_assist") != 0)
++		return;
++
++	ddl_sdata_ptr = (struct ddl_sinfo_data_compat *)
++		kallsyms_lookup_name("ddl_sdata");
++	if (!ddl_sdata_ptr) {
++		pr_err("ddl_hit_hook: symbol ddl_sdata not found\n");
++		return;
 +	}
 +
-+	return task;
- }
- EXPORT_SYMBOL_GPL(find_task_by_vpid);
- 
-@@ -649,6 +693,7 @@ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
- 
- void __init pid_idr_init(void)
++	old_func = kallsyms_lookup_name("update_ddl_hit_history");
++	if (!old_func) {
++		pr_err("ddl_hit_hook: symbol update_ddl_hit_history not found\n");
++		return;
++	}
++
++	if (patch_func_jump(old_func,
++			    (unsigned long)update_ddl_hit_history_new))
++		pr_err("ddl_hit_hook: text patch failed\n");
++	else
++		pr_info("ddl_hit_hook: update_ddl_hit_history patched -> %ps\n",
++			update_ddl_hit_history_new);
++}
++
+ static int prepare_coming_module(struct module *mod)
  {
-+	init_ghost_task();
- 	/* Verify no one has done anything silly: */
- 	BUILD_BUG_ON(PID_MAX_LIMIT >= PIDNS_ADDING);
+ 	int err;
+@@ -3251,6 +3335,8 @@ static int prepare_coming_module(struct module *mod)
+ 	if (err)
+ 		klp_module_going(mod);
  
--- 
-2.52.0.windows.1
-
++	hook_sched_assist_module(mod);
++
+ 	return err;
+ }
+ 
