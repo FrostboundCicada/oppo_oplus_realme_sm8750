@@ -418,6 +418,15 @@ if [[ "$APPLY_KGSL_UPGRADE" == "y" || "$APPLY_KGSL_UPGRADE" == "Y" ]]; then
   echo "CONFIG_QCOM_KGSL=y" >> "$DEFCONFIG_FILE"
 fi
 
+# ===== 应用 Gunyah 虚拟化补丁 =====
+echo ">>> 正在应用 Gunyah 虚拟化驱动修复补丁..."
+cd "$WORKDIR/common"
+wget https://github.com/FrostboundCicada/oppo_oplus_realme_sm8750/raw/refs/heads/main/gunyah_patch/001-fix-large-memory-kvcalloc.patch
+wget https://github.com/FrostboundCicada/oppo_oplus_realme_sm8750/raw/refs/heads/main/gunyah_patch/002-fix-scm-vmid-share-reclaim.patch
+patch -p1 -F 3 < 001-fix-large-memory-kvcalloc.patch || true
+patch -p1 -F 3 < 002-fix-scm-vmid-share-reclaim.patch || true
+cd "$WORKDIR"
+
 # ===== 禁用 defconfig 检查 =====
 echo ">>> 禁用 defconfig 检查..."
 sed -i 's/check_defconfig//' ./common/build.config.gki
