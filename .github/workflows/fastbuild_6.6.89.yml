@@ -568,6 +568,9 @@ jobs:
             echo ">>> 正在启用 KVM 虚拟化支持..."
             echo "CONFIG_VIRTUALIZATION=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KVM=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_ARM_HOST=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_ARM_VGIC=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_ARM_TIMER=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KVM_MMIO=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KVM_VFIO=y" >> ./common/arch/arm64/configs/gki_defconfig
