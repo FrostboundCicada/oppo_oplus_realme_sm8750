@@ -80,6 +80,21 @@ on:
         required: true
         type: boolean
         default: 'true'
+      kvm_enable:
+        description: '是否开启KVM虚拟化支持(开启KVM将强制关闭pKVM)'
+        required: true
+        type: boolean
+        default: 'false'
+      pkvm_enable:
+        description: '是否开启pKVM保护虚拟化支持(开启pKVM将强制关闭KVM)'
+        required: true
+        type: boolean
+        default: 'false'
+      kgsl_upgrade:
+        description: '是否升级 KGSL 接口版本为最新'
+        required: true
+        type: boolean
+        default: 'false'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -532,6 +547,56 @@ jobs:
           curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
+      - name: 配置 KVM / pKVM / KGSL
+        run: |
+          cd kernel_workspace
+          # KVM 与 pKVM 互斥处理
+          KVM_ENABLE="${{ github.event.inputs.kvm_enable }}"
+          PKVM_ENABLE="${{ github.event.inputs.pkvm_enable }}"
+          if [[ "$KVM_ENABLE" == "true" ]]; then
+            PKVM_ENABLE="false"
+          fi
+          if [[ "$PKVM_ENABLE" == "true" ]]; then
+            KVM_ENABLE="false"
+          fi
+          # 配置 KVM
+          if [[ "$KVM_ENABLE" == "true" ]]; then
+            echo ">>> 正在启用 KVM 虚拟化支持..."
+            cat >> ./common/arch/arm64/configs/gki_defconfig <<EOF
+CONFIG_VIRTUALIZATION=y
+CONFIG_KVM=y
+CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT=y
+CONFIG_KVM_MMIO=y
+CONFIG_KVM_VFIO=y
+CONFIG_KVM_GENERIC_HARDWARE_ENABLING=y
+CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES=y
+CONFIG_KVM_COMPAT=y
+CONFIG_KVM_XFER_TO_GUEST_WORK=y
+CONFIG_KVM_PRIVATE_MEM=y
+CONFIG_KVM_GENERIC_PRIVATE_MEM=y
+EOF
+          else
+            echo ">>> 已禁用 KVM，清除所有 KVM 相关配置..."
+            echo "CONFIG_VIRTUALIZATION=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          # 配置 pKVM
+          if [[ "$PKVM_ENABLE" == "true" ]]; then
+            echo ">>> 正在启用 pKVM 保护虚拟化支持..."
+            cat >> ./common/arch/arm64/configs/gki_defconfig <<EOF
+CONFIG_PKVM=y
+CONFIG_NVHE_EL2_DEBUG=y
+EOF
+          else
+            echo ">>> 已禁用 pKVM，清除所有 pKVM 相关配置..."
+            echo "CONFIG_PKVM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          # 配置 KGSL 接口版本升级
+          if [[ "${{ github.event.inputs.kgsl_upgrade }}" == "true" ]]; then
+            echo ">>> 正在升级 KGSL 接口版本为最新..."
+            echo "CONFIG_QCOM_KGSL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -720,6 +785,9 @@ jobs:
           echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
+          echo "KVM: ${{ github.event.inputs.kvm_enable }}" >> ./ak3.log
+          echo "pKVM: ${{ github.event.inputs.pkvm_enable }}" >> ./ak3.log
+          echo "KGSL Upgrade: ${{ github.event.inputs.kgsl_upgrade }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -805,6 +873,9 @@ jobs:
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+          - KVM支持：${{ github.event.inputs.kvm_enable }}
+          - pKVM支持：${{ github.event.inputs.pkvm_enable }}
+          - KGSL接口版本升级：${{ github.event.inputs.kgsl_upgrade }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)

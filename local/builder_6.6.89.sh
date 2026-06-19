@@ -33,6 +33,20 @@ read -p "是否启用Re-Kernel？(y/n，默认：n): " APPLY_REKERNEL
 APPLY_REKERNEL=${APPLY_REKERNEL:-n}
 read -p "是否启用内核级基带保护？(y/n，默认：y): " APPLY_BBG
 APPLY_BBG=${APPLY_BBG:-y}
+read -p "是否启用 KVM？(y/n，默认：n，开启KVM将强制关闭pKVM): " APPLY_KVM
+APPLY_KVM=${APPLY_KVM:-n}
+read -p "是否启用 pKVM？(y/n，默认：n，开启pKVM将强制关闭KVM): " APPLY_PKVM
+APPLY_PKVM=${APPLY_PKVM:-n}
+read -p "是否升级 KGSL 接口版本为最新？(y/n，默认：n): " APPLY_KGSL_UPGRADE
+APPLY_KGSL_UPGRADE=${APPLY_KGSL_UPGRADE:-n}
+
+# KVM 与 pKVM 互斥处理
+if [[ "$APPLY_KVM" == "y" || "$APPLY_KVM" == "Y" ]]; then
+  APPLY_PKVM="n"
+fi
+if [[ "$APPLY_PKVM" == "y" || "$APPLY_PKVM" == "Y" ]]; then
+  APPLY_KVM="n"
+fi
 
 if [[ "$KSU_BRANCH" == "y" || "$KSU_BRANCH" == "Y" ]]; then
   KSU_TYPE="SukiSU Ultra"
@@ -61,6 +75,9 @@ echo "应用 Droidspaces 容器支持: $APPLY_DROIDSPACES"
 echo "启用ADIOS调度器: $APPLY_ADIOS"
 echo "启用Re-Kernel: $APPLY_REKERNEL"
 echo "启用内核级基带保护: $APPLY_BBG"
+echo "启用 KVM: $APPLY_KVM"
+echo "启用 pKVM: $APPLY_PKVM"
+echo "升级 KGSL 接口版本: $APPLY_KGSL_UPGRADE"
 echo "===================="
 echo
 
@@ -361,6 +378,46 @@ if [[ "$APPLY_BBG" == "y" || "$APPLY_BBG" == "Y" ]]; then
   cd ..
 fi
 
+# ===== 启用 KVM =====
+if [[ "$APPLY_KVM" == "y" || "$APPLY_KVM" == "Y" ]]; then
+  echo ">>> 正在启用 KVM 虚拟化支持..."
+  cat >> "$DEFCONFIG_FILE" <<EOF
+CONFIG_VIRTUALIZATION=y
+CONFIG_KVM=y
+CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT=y
+CONFIG_KVM_MMIO=y
+CONFIG_KVM_VFIO=y
+CONFIG_KVM_GENERIC_HARDWARE_ENABLING=y
+CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES=y
+CONFIG_KVM_COMPAT=y
+CONFIG_KVM_XFER_TO_GUEST_WORK=y
+CONFIG_KVM_PRIVATE_MEM=y
+CONFIG_KVM_GENERIC_PRIVATE_MEM=y
+EOF
+else
+  echo ">>> 已禁用 KVM，清除所有 KVM 相关配置..."
+  echo "CONFIG_VIRTUALIZATION=n" >> "$DEFCONFIG_FILE"
+  echo "CONFIG_KVM=n" >> "$DEFCONFIG_FILE"
+fi
+
+# ===== 启用 pKVM =====
+if [[ "$APPLY_PKVM" == "y" || "$APPLY_PKVM" == "Y" ]]; then
+  echo ">>> 正在启用 pKVM 保护虚拟化支持..."
+  cat >> "$DEFCONFIG_FILE" <<EOF
+CONFIG_PKVM=y
+CONFIG_NVHE_EL2_DEBUG=y
+EOF
+else
+  echo ">>> 已禁用 pKVM，清除所有 pKVM 相关配置..."
+  echo "CONFIG_PKVM=n" >> "$DEFCONFIG_FILE"
+fi
+
+# ===== 升级 KGSL 接口版本 =====
+if [[ "$APPLY_KGSL_UPGRADE" == "y" || "$APPLY_KGSL_UPGRADE" == "Y" ]]; then
+  echo ">>> 正在升级 KGSL 接口版本为最新..."
+  echo "CONFIG_QCOM_KGSL=y" >> "$DEFCONFIG_FILE"
+fi
+
 # ===== 禁用 defconfig 检查 =====
 echo ">>> 禁用 defconfig 检查..."
 sed -i 's/check_defconfig//' ./common/build.config.gki
@@ -437,6 +494,15 @@ if [[ "$APPLY_REKERNEL" == "y" || "$APPLY_REKERNEL" == "Y" ]]; then
 fi
 if [[ "$APPLY_BBG" == "y" || "$APPLY_BBG" == "Y" ]]; then
   ZIP_NAME="${ZIP_NAME}-bbg"
+fi
+if [[ "$APPLY_KVM" == "y" || "$APPLY_KVM" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-kvm"
+fi
+if [[ "$APPLY_PKVM" == "y" || "$APPLY_PKVM" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-pkvm"
+fi
+if [[ "$APPLY_KGSL_UPGRADE" == "y" || "$APPLY_KGSL_UPGRADE" == "Y" ]]; then
+  ZIP_NAME="${ZIP_NAME}-kgsl"
 fi
 
 ZIP_NAME="${ZIP_NAME}-v$(date +%Y%m%d).zip"
