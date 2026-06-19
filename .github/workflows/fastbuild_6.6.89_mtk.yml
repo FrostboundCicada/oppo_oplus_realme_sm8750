@@ -562,19 +562,17 @@ jobs:
           # 配置 KVM
           if [[ "$KVM_ENABLE" == "true" ]]; then
             echo ">>> 正在启用 KVM 虚拟化支持..."
-            cat >> ./common/arch/arm64/configs/gki_defconfig <<EOF
-CONFIG_VIRTUALIZATION=y
-CONFIG_KVM=y
-CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT=y
-CONFIG_KVM_MMIO=y
-CONFIG_KVM_VFIO=y
-CONFIG_KVM_GENERIC_HARDWARE_ENABLING=y
-CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES=y
-CONFIG_KVM_COMPAT=y
-CONFIG_KVM_XFER_TO_GUEST_WORK=y
-CONFIG_KVM_PRIVATE_MEM=y
-CONFIG_KVM_GENERIC_PRIVATE_MEM=y
-EOF
+            echo "CONFIG_VIRTUALIZATION=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_MMIO=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_VFIO=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_GENERIC_HARDWARE_ENABLING=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_COMPAT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_XFER_TO_GUEST_WORK=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_PRIVATE_MEM=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KVM_GENERIC_PRIVATE_MEM=y" >> ./common/arch/arm64/configs/gki_defconfig
           else
             echo ">>> 已禁用 KVM，清除所有 KVM 相关配置..."
             echo "CONFIG_VIRTUALIZATION=n" >> ./common/arch/arm64/configs/gki_defconfig
@@ -583,10 +581,8 @@ EOF
           # 配置 pKVM
           if [[ "$PKVM_ENABLE" == "true" ]]; then
             echo ">>> 正在启用 pKVM 保护虚拟化支持..."
-            cat >> ./common/arch/arm64/configs/gki_defconfig <<EOF
-CONFIG_PKVM=y
-CONFIG_NVHE_EL2_DEBUG=y
-EOF
+            echo "CONFIG_PKVM=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NVHE_EL2_DEBUG=y" >> ./common/arch/arm64/configs/gki_defconfig
           else
             echo ">>> 已禁用 pKVM，清除所有 pKVM 相关配置..."
             echo "CONFIG_PKVM=n" >> ./common/arch/arm64/configs/gki_defconfig
