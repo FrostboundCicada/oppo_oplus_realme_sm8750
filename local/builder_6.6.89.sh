@@ -395,8 +395,7 @@ CONFIG_KVM_PRIVATE_MEM=y
 CONFIG_KVM_GENERIC_PRIVATE_MEM=y
 EOF
 else
-  echo ">>> 已禁用 KVM，清除所有 KVM 相关配置..."
-  echo "CONFIG_VIRTUALIZATION=n" >> "$DEFCONFIG_FILE"
+  echo ">>> 已禁用 KVM，清除 KVM 相关配置（保留 Gunyah 虚拟化支持）..."
   echo "CONFIG_KVM=n" >> "$DEFCONFIG_FILE"
 fi
 
