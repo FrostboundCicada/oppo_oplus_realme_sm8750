@@ -475,6 +475,9 @@ jobs:
             # 修补 oplus_bsp_midas 行为，避免开机崩溃
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
             patch -p1 -F 3 < fix_oplus_bsp_midas.patch || true
+            # 修复 oplus_bsp_sched_assist 的 update_ddl_hit_history 越界访问，避免容器环境下不定时重启
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/ddl_hit_hook.patch
+            patch -p1 -F 3 < ddl_hit_hook.patch || true
             # 应用 NTSync 补丁
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
