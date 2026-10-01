@@ -261,12 +261,14 @@ jobs:
             curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash -s main
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
-            # 必须使用 ReSukiSU 原版本号公式（30000+count+700），与 ReSukiSU 管理器版本号体系一致。
-            # 上次错误地改用 SukiSU-Ultra 公式（40000+count-2815），导致内核 KSU_VERSION=41674，
-            # 而 ReSukiSU 管理器仅 35061，管理器判定自身版本过低报警。
-            # KSU_VERSION 必须与所用管理器同体系，不能为了"好看"跨体系改公式。
-            # 生成自定义版本号（基于提交计数）, 失败时使用 114514
-            KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+            # 固定内核 KSU_VERSION=35000（同时改 Kbuild 和 workflow 变量）。
+            # Kbuild 第77行原公式 30000+git rev-list count+700 会跟随 main 最新提交
+            # （~4489 → 35189），高于任何已发布 ReSukiSU 管理器（rc1=35061，release
+            # 永远滞后于 main），导致管理器判定自身版本过低报警。
+            # 固定 35000 低于所有管理器版本，永久规避此问题。KSU_VERSION 仅用于显示
+            # 与兼容性检查，不影响功能。
+            sed -i 's|^KSU_VERSION :=.*|KSU_VERSION := 35000|' kernel/Kbuild
+            KSU_VERSION=35000
             # 存储版本号到 GitHub 环境变量
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
