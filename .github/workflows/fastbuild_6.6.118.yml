@@ -324,6 +324,10 @@ jobs:
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             cd ./common
             patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+            # 注：50_add 对 fs/proc/task_mmu.c 的 Hunk #6 会被拒绝（日志出现 "1 out of 9 hunks FAILED" + .rej），
+            # 这是冗余无害的：当前 OKI 6.6.118 的 show_smaps_rollup 已把两处 "Case 4 above" 合并为一处，
+            # Hunk #6 的目标位置已不存在；同文件 Hunk #7 已在新位置正确补上同样的 SUS_MAP 保护，
+            # 故 SUS_MAP 在 /proc/pid/smaps_rollup 的隐藏功能完整，无需处理该 .rej。
             patch -p1 -N -F 3 < 69_hide_stuff.patch || true
             cd ..
           else
@@ -364,6 +368,16 @@ jobs:
           cd ./common
           git apply -p1 < 001-lz4.patch || true
           patch -p1 < 002-zstd.patch || true
+          # 硬性校验：patch 失败会被上面的 || true 吞没，此处拦截，避免 lz4/zstd 升级静默丢失
+          if ! grep -q "LZ4_arm64_decompress_safe" crypto/lz4.c || ! grep -q "LZ4_arm64_decompress_safe" crypto/lz4hc.c; then
+            echo "::error::001-lz4.patch 未生效（crypto/lz4.c 或 lz4hc.c 缺 LZ4_arm64_decompress_safe）"
+            exit 1
+          fi
+          if ! grep -qE 'ZSTD_VERSION_RELEASE +7$' include/linux/zstd_lib.h; then
+            echo "::error::002-zstd.patch 未生效（include/linux/zstd_lib.h 版本不是 1.5.7）"
+            exit 1
+          fi
+          echo "✅ lz4 1.10.0 + zstd 1.5.7 补丁已全部生效"
 
       - name: 应用 lz4kd 补丁
         if: inputs.lz4kd_enable
