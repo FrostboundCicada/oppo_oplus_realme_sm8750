@@ -23,7 +23,7 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启SUSFS（SukiSU Ultra 将使用官方 susfs-main 分支；其他分支沿用各自的补丁流程）'
+        description: '是否开启SUSFS（SukiSU Ultra 使用官方 builtin 分支并启用 ARM64 branch-link hook；其他分支沿用各自补丁流程）'
         required: true
         type: boolean
         default: 'true'
@@ -244,13 +244,35 @@ jobs:
           if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "正在配置 SukiSU Ultra 官方最新提交..."
             if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
-              # 官方 SUSFS 集成分支；不再叠加第三方 susfs4oki 补丁。
-              SUKISU_BRANCH="susfs-main"
+              # 官方 builtin 分支携带 SUSFS Kconfig；ARM64 通过官方 branch-link hook 避免手工逐个插桩。
+              SUKISU_BRANCH="builtin"
             else
               SUKISU_BRANCH="main"
             fi
             echo "SukiSU 集成分支：$SUKISU_BRANCH"
             curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- "$SUKISU_BRANCH"
+
+            # 不允许 setup 脚本静默回退到其他分支；确认实际 checkout 和必要 Kconfig 均存在。
+            if [[ ! -d ./KernelSU/.git ]]; then
+              echo "::error::SukiSU setup 后未找到 ./KernelSU Git 仓库"
+              exit 1
+            fi
+            ACTUAL_SUKISU_BRANCH=$(git -C ./KernelSU branch --show-current)
+            echo "实际 SukiSU 分支：${ACTUAL_SUKISU_BRANCH:-detached HEAD}"
+            if [[ "$ACTUAL_SUKISU_BRANCH" != "$SUKISU_BRANCH" ]]; then
+              echo "::error::SukiSU 分支不匹配：期望 $SUKISU_BRANCH，实际 ${ACTUAL_SUKISU_BRANCH:-detached HEAD}"
+              exit 1
+            fi
+            if [[ "$SUKISU_BRANCH" == "builtin" ]]; then
+              if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_SUSFS([[:space:]]|$)' ./KernelSU/kernel; then
+                echo "::error::官方 builtin 源码中未找到 CONFIG_KSU_SUSFS 的 Kconfig 定义"
+                exit 1
+              fi
+              if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_HACK_ARM64_BRANCH_LINK([[:space:]]|$)' ./KernelSU/kernel; then
+                echo "::error::官方 builtin 源码中未找到 CONFIG_KSU_HACK_ARM64_BRANCH_LINK；不能安全跳过手动 hooks"
+                exit 1
+              fi
+            fi
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
 
             cd ./KernelSU
@@ -602,6 +624,23 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          # SUSFS 配置前置门禁：在耗时的 Image 编译前确认 Kconfig 确实识别了所有选项。
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
+            for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
+              if ! grep -q "^${sym}=y$" out/.config; then
+                echo "::error::gki_defconfig 后 ${sym}=y 未生效；停止编译以避免生成不含完整 SUSFS 的内核"
+                grep -E "^(CONFIG_KSU_SUSFS|# CONFIG_KSU_SUSFS|CONFIG_KSU_HACK_ARM64_BRANCH_LINK|# CONFIG_KSU_HACK_ARM64_BRANCH_LINK)" out/.config || true
+                exit 1
+              fi
+            done
+            if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]] && ! grep -q '^CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y$' out/.config; then
+              echo "::error::SukiSU builtin 的 ARM64 branch-link hook 未在最终 .config 启用"
+              exit 1
+            fi
+            echo "✅ SUSFS 配置前置校验通过，开始编译 Image"
+          fi
+
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
           
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
@@ -816,7 +855,7 @@ jobs:
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
           - SukiSU 官方提交：${{ needs.build.outputs.sukisu_commit }}
-          - SukiSU 勾选 SUSFS 时使用官方 susfs-main 分支；关闭时使用官方 main 分支。
+          - SukiSU 勾选 SUSFS 时使用官方 builtin 集成分支并启用 ARM64 branch-link hook；关闭时使用官方 main 分支。
           
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
@@ -824,7 +863,7 @@ jobs:
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU Ultra 勾选 SUSFS 时会切换到官方 susfs-main 集成分支，并验证最终 .config。
+          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU Ultra 勾选 SUSFS 时会切换到官方 builtin 分支，启用 ARM64 branch-link hook，并在 Image 编译前验证最终 .config。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
