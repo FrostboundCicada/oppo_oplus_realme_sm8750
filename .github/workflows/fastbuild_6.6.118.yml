@@ -23,12 +23,12 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启susfs(注意: SukiSU Ultra 分支源码原生不支持susfs，选择sukisu时此项无效)'
+        description: '是否开启SUSFS（SukiSU Ultra 将使用官方 susfs-main 分支；其他分支沿用各自的补丁流程）'
         required: true
         type: boolean
         default: 'true'
       kpm_enable:
-        description: '是否开启kpm(直接通过源码编译内置开启, 仅 SukiSU/ReSukiSU 分支支持; 其他分支不支持; 不需要可保持默认关闭)'
+        description: '是否开启 KPM（SukiSU Ultra 按官方集成方式启用 CONFIG_KPM；ReSukiSU 沿用现有流程）'
         required: true
         type: boolean
         default: 'false'
@@ -101,6 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+      sukisu_commit: ${{ steps.ksu_version.outputs.sukisu_commit }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
     permissions:
       actions: write
@@ -240,30 +241,32 @@ jobs:
         id: ksu_version
         run: |
           cd kernel_workspace
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            echo "正在配置SukiSU Ultra（拉取最新构建版）..."
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/main/kernel/setup.sh" | bash -s main
-            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
-            
-            # --- 方案一：源码级集成 KPM 补丁 ---
-            if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
-              echo "正在下载并应用 KernelPatch 补丁 (源码级)..."
-              cd common
-              wget https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux
-              chmod +x patch_linux
-              ./patch_linux || true
-              rm -f patch_linux
-              cd ..
+          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+            echo "正在配置 SukiSU Ultra 官方最新提交..."
+            if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+              # 官方 SUSFS 集成分支；不再叠加第三方 susfs4oki 补丁。
+              SUKISU_BRANCH="susfs-main"
+            else
+              SUKISU_BRANCH="main"
             fi
-            # ----------------------------------
+            echo "SukiSU 集成分支：$SUKISU_BRANCH"
+            curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- "$SUKISU_BRANCH"
+            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
 
             cd ./KernelSU
-            KSU_VERSION=$(grep -m1 '^KSU_VERSION' kernel/Kbuild | grep -oE '[0-9]+(-[a-zA-Z0-9]+)?' | head -n1)
-            if [ -z "$KSU_VERSION" ]; then
-              KSU_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo "latest")
+            SUKISU_COMMIT=$(git rev-parse HEAD)
+            SUKISU_COMMIT_SHORT=$(git rev-parse --short=12 HEAD)
+            KSU_VERSION=$(grep -m1 '^KSU_VERSION' kernel/Kbuild | grep -oE '[0-9]+(-[a-zA-Z0-9]+)?' | head -n1 || true)
+            if [[ -z "$KSU_VERSION" ]]; then
+              KSU_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo "unknown")
             fi
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+            echo "SUKISU_COMMIT=$SUKISU_COMMIT" >> "$GITHUB_ENV"
+            echo "SUKISU_BRANCH=$SUKISU_BRANCH" >> "$GITHUB_ENV"
+            echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+            echo "ksuver=$KSU_VERSION" >> "$GITHUB_OUTPUT"
+            echo "sukisu_commit=$SUKISU_COMMIT" >> "$GITHUB_OUTPUT"
+            echo "SukiSU commit: $SUKISU_COMMIT ($SUKISU_COMMIT_SHORT)"
+            cd ..
           elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
             echo "正在配置ReSukiSU/BakaSU（锁定 v4.2.0-rc3，main 分支含 SUSFS 门禁 error 指令）..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s v4.2.0-rc3
@@ -359,7 +362,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'sukisu' }}
+        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -378,11 +381,12 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           
-          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" || "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
 
-          # 开启原生 KPM 及其依赖
+          # SukiSU Ultra 官方集成文档要求通过 CONFIG_KPM=y 启用 KPM。
+          # 不在源码目录中无参数运行 patch_linux；该方式无法证明补丁已生效。
           if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
             if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" || "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
               echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -607,7 +611,7 @@ jobs:
           df -h
 
       - name: 硬性验证 SUSFS 关键 CONFIG 已编入最终 .config
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'sukisu' && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -640,12 +644,14 @@ jobs:
           set -eu
           CONFIG=out/.config
           echo "===== 校验最终 KPM .config ====="
-          if grep -q "^CONFIG_KPM=y" "$CONFIG"; then
-             echo "✅ CONFIG_KPM = y 已生效"
-          else
-             echo "::error::CONFIG_KPM 未编入内核！补丁可能未应用成功。"
-             exit 1
-          fi
+          for sym in CONFIG_KPM CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
+            if ! grep -q "^${sym}=y$" "$CONFIG"; then
+              echo "::error::${sym}=y 未编入最终 .config"
+              exit 1
+            fi
+            echo "✓ ${sym}=y"
+          done
+          echo "✅ KPM 配置验证通过"
 
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
@@ -704,6 +710,10 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
+          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+            echo "SukiSU Branch: ${SUKISU_BRANCH}" >> ./ak3.log
+            echo "SukiSU Commit: ${SUKISU_COMMIT}" >> ./ak3.log
+          fi
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
@@ -727,7 +737,8 @@ jobs:
       - name: 上传 ZIP 工件
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
+          name: ${{ steps.create_zip.outputs.ak3name }}
+          path: ${{ github.workspace }}/kernel_workspace/${{ steps.create_zip.outputs.ak3name }}
           archive: false
 
   release:
@@ -804,7 +815,8 @@ jobs:
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
-          - (预留)
+          - SukiSU 官方提交：${{ needs.build.outputs.sukisu_commit }}
+          - SukiSU 勾选 SUSFS 时使用官方 susfs-main 分支；关闭时使用官方 main 分支。
           
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
@@ -812,7 +824,7 @@ jobs:
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. 当前内核的 KPM 功能已通过源码直接编译内置（仅 SukiSU / ReSukiSU 支持），无需刷入额外 KPN 模块。若选择了 SukiSU Ultra 分支，因其原生不支持 SUSFS，即使勾选了开启也会自动跳过。
+          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU Ultra 勾选 SUSFS 时会切换到官方 susfs-main 集成分支，并验证最终 .config。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
