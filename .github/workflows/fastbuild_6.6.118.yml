@@ -250,7 +250,21 @@ jobs:
         run: |
           # 进入内核工作目录
           cd kernel_workspace
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+            echo "正在配置SukiSU Ultra（拉取最新构建版）..."
+            # 拉取 SukiSU Ultra 官方 main 分支最新源码
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/main/kernel/setup.sh" | bash -s main
+            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
+            cd ./KernelSU
+            # 移除强制固定内核版本，动态提取上游自动生成的版本号用于打包命名
+            KSU_VERSION=$(grep -m1 '^KSU_VERSION' kernel/Kbuild | grep -oE '[0-9]+(-[a-zA-Z0-9]+)?' | head -n1)
+            if [ -z "$KSU_VERSION" ]; then
+              # 如果提取失败，兜底取当前 commit 数
+              KSU_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo "latest")
+            fi
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
             # ReSukiSU 已更名为 BakaSU（仓库迁至 Baka-SU/BakaSU），仍兼容 sukisu 管理器。
             #
             # 【必须锁定 v4.2.0-rc3 tag，不能用 main】main 分支 2026-10-14 的 commit d7260ca
@@ -748,7 +762,7 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ github.ref_name }}
-         
+
       - name: 应用KPM并修补内核
         if: inputs.kpm_enable
         run: |
@@ -847,7 +861,7 @@ jobs:
       contents: write
       packages: write
       actions: read
-      
+
     steps:
       - name: 下载 ZIP 工件
         uses: actions/download-artifact@v8
