@@ -355,12 +355,18 @@ jobs:
           from pathlib import Path
           import re, sys
 
-          def insert_once(path, pattern, replacement, label):
+          def insert_once(path, pattern, replacement, marker, label):
               p = Path(path)
               text = p.read_text()
-              if replacement.strip() in text:
-                  print(f"✓ {label} 已存在，跳过")
+              # Idempotency is based on the actual function-call marker, not whitespace-sensitive
+              # matching of the whole inserted block. This prevents duplicate hooks when an
+              # earlier SUSFS patch already added the same call.
+              count = text.count(marker)
+              if count == 1:
+                  print(f"✓ {label} 已存在且唯一，跳过")
                   return
+              if count > 1:
+                  raise SystemExit(f"::error::{label}: {path} 中调用已出现 {count} 次，拒绝自动删除或继续插入")
               matches = list(re.finditer(pattern, text, flags=re.S))
               if len(matches) != 1:
                   raise SystemExit(f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个目标位置，拒绝盲目修改")
@@ -374,28 +380,28 @@ jobs:
               "common/fs/exec.c",
               r"(static int do_execveat_common\s*\([^)]*\)\s*\{(?:(?!\n\}).)*?\n\s*int retval;)",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
-              "execveat hook")
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);", "execveat hook")
 
           # Hook sys_faccessat (not do_faccessat) to keep the interception scope narrow.
           insert_once(
               "common/fs/open.c",
               r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
-              "faccessat hook")
+              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);", "faccessat hook")
 
           # Hook sys_newfstatat, not vfs_statx().
           insert_once(
               "common/fs/stat.c",
               r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
-              "newfstatat hook")
+              "ksu_handle_stat(&dfd, &filename, &flag);", "newfstatat hook")
 
           # New KernelSU supercall reboot hook.
           insert_once(
               "common/kernel/reboot.c",
               r"(SYSCALL_DEFINE4\(reboot,\s*int,\s*magic1,\s*int,\s*magic2,\s*unsigned int,\s*cmd,\s*void __user \*,\s*arg\)\s*\{(?:(?!\n\}).)*?\n\s*int ret = 0;)",
               "\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\n\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif",
-              "reboot hook")
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);", "reboot hook")
 
           # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
@@ -407,8 +413,13 @@ jobs:
           for path, needles in checks.items():
               content = Path(path).read_text()
               for needle in needles:
-                  if content.count(needle) != 1:
-                      raise SystemExit(f"::error::Hook 验证失败：{path} 中 {needle!r} 出现 {content.count(needle)} 次")
+                  count = content.count(needle)
+                  if count != 1:
+                      print(f"::error::Hook 验证失败：{path} 中 {needle!r} 出现 {count} 次")
+                      for i, line in enumerate(content.splitlines(), 1):
+                          if needle in line:
+                              print(f"  {path}:{i}: {line.strip()}")
+                      raise SystemExit(1)
           print("已验证 execveat / faccessat / newfstatat / reboot 四个 Hook。")
           print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
           PYHOOK
