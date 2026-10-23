@@ -382,19 +382,31 @@ jobs:
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
               "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);", "execveat hook")
 
-          # Hook sys_faccessat (not do_faccessat) to keep the interception scope narrow.
-          insert_once(
-              "common/fs/open.c",
-              r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
-              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
-              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);", "faccessat hook")
+          # SUSFS-enabled SukiSU changes these handler APIs to take struct filename **.
+          # The syscall entry points below expose const char __user * instead, so the
+          # generic user-pointer hooks are ABI-incompatible in this configuration.
+          # Do not inject a conflicting declaration or an invalid call; keep these hooks
+          # disabled unless the source has the user-pointer API expected by the generic guide.
+          open_source = Path("common/fs/open.c").read_text()
+          if re.search(r"ksu_handle_faccessat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", open_source):
+              print("⚠ SUSFS 的 faccessat handler 使用 struct filename **；跳过不兼容的 syscall-level user-pointer hook")
+          else:
+              insert_once(
+                  "common/fs/open.c",
+                  r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
+                  "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
+                  "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);", "faccessat hook")
 
-          # Hook sys_newfstatat, not vfs_statx().
-          insert_once(
-              "common/fs/stat.c",
-              r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
-              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
-              "ksu_handle_stat(&dfd, &filename, &flag);", "newfstatat hook")
+          # Hook sys_newfstatat only when the handler uses the user-pointer API.
+          stat_source = Path("common/fs/stat.c").read_text()
+          if re.search(r"ksu_handle_stat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", stat_source):
+              print("⚠ SUSFS 的 stat handler 使用 struct filename **；跳过不兼容的 syscall-level user-pointer hook")
+          else:
+              insert_once(
+                  "common/fs/stat.c",
+                  r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
+                  "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
+                  "ksu_handle_stat(&dfd, &filename, &flag);", "newfstatat hook")
 
           # New KernelSU supercall reboot hook.
           insert_once(
@@ -406,10 +418,13 @@ jobs:
           # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
               "common/fs/exec.c": ["ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"],
-              "common/fs/open.c": ["ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"],
-              "common/fs/stat.c": ["ksu_handle_stat(&dfd, &filename, &flag);"],
               "common/kernel/reboot.c": ["ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"]
           }
+          # Validate user-pointer hooks only when the corresponding SUSFS filename** API is absent.
+          if not re.search(r"ksu_handle_faccessat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", Path("common/fs/open.c").read_text()):
+              checks["common/fs/open.c"] = ["ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"]
+          if not re.search(r"ksu_handle_stat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", Path("common/fs/stat.c").read_text()):
+              checks["common/fs/stat.c"] = ["ksu_handle_stat(&dfd, &filename, &flag);"]
           for path, needles in checks.items():
               content = Path(path).read_text()
               for needle in needles:
