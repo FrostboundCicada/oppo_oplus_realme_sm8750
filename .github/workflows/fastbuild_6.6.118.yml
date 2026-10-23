@@ -268,10 +268,6 @@ jobs:
                 echo "::error::官方 builtin 源码中未找到 CONFIG_KSU_SUSFS 的 Kconfig 定义"
                 exit 1
               fi
-              if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_HACK_ARM64_BRANCH_LINK([[:space:]]|$)' ./KernelSU/kernel; then
-                echo "::error::官方 builtin 源码中未找到 CONFIG_KSU_HACK_ARM64_BRANCH_LINK；不能安全跳过手动 hooks"
-                exit 1
-              fi
             fi
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
 
@@ -325,7 +321,7 @@ jobs:
           fi
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'sukisu' && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
         run: |
           cd kernel_workspace
           echo "正在添加susfs补丁..."
@@ -338,14 +334,85 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
           cd ..
-          if [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
+          if [[ "${{ github.event.inputs.ksu_type }}" == "ksu" ]]; then
             cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
             cd ./KernelSU
             patch -p1 < 10_enable_susfs_for_ksu.patch || true
-          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
-            echo "ReSukiSU 已原生集成 SUSFS，跳过 bridge 补丁 01-04..."
+          elif [[ "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
+            echo "ReSukiSU 已原生集成 SUSFS，跳过 KernelSU bridge 补丁。"
+          elif [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+            echo "SukiSU builtin 自带 SUSFS Kconfig；已应用内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
           fi
           
+      - name: 为 SukiSU builtin 接入 ARM64 手动 Hooks
+        if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
+        working-directory: kernel_workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "为 SukiSU builtin 接入 Linux 6.6 手动 Hooks（Android 15）..."
+          python3 - <<'PYHOOK'
+          from pathlib import Path
+          import re, sys
+
+          def insert_once(path, pattern, replacement, label):
+              p = Path(path)
+              text = p.read_text()
+              if replacement.strip() in text:
+                  print(f"✓ {label} 已存在，跳过")
+                  return
+              matches = list(re.finditer(pattern, text, flags=re.S))
+              if len(matches) != 1:
+                  raise SystemExit(f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个目标位置，拒绝盲目修改")
+              m = matches[0]
+              text = text[:m.end()] + replacement + text[m.end():]
+              p.write_text(text)
+              print(f"✓ 已插入 {label}")
+
+          # Linux 6.6 Android common: do_execveat_common has int retval; before first executable logic.
+          insert_once(
+              "common/fs/exec.c",
+              r"(static int do_execveat_common\s*\([^)]*\)\s*\{(?:(?!\n\}).)*?\n\s*int retval;)",
+              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
+              "execveat hook")
+
+          # Hook sys_faccessat (not do_faccessat) to keep the interception scope narrow.
+          insert_once(
+              "common/fs/open.c",
+              r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
+              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
+              "faccessat hook")
+
+          # Hook sys_newfstatat, not vfs_statx().
+          insert_once(
+              "common/fs/stat.c",
+              r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
+              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
+              "newfstatat hook")
+
+          # New KernelSU supercall reboot hook.
+          insert_once(
+              "common/kernel/reboot.c",
+              r"(SYSCALL_DEFINE4\(reboot,\s*int,\s*magic1,\s*int,\s*magic2,\s*unsigned int,\s*cmd,\s*void __user \*,\s*arg\)\s*\{(?:(?!\n\}).)*?\n\s*int ret = 0;)",
+              "\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\n\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif",
+              "reboot hook")
+
+          # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
+          checks = {
+              "common/fs/exec.c": ["ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"],
+              "common/fs/open.c": ["ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"],
+              "common/fs/stat.c": ["ksu_handle_stat(&dfd, &filename, &flag);"],
+              "common/kernel/reboot.c": ["ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"]
+          }
+          for path, needles in checks.items():
+              content = Path(path).read_text()
+              for needle in needles:
+                  if content.count(needle) != 1:
+                      raise SystemExit(f"::error::Hook 验证失败：{path} 中 {needle!r} 出现 {content.count(needle)} 次")
+          print("已验证 execveat / faccessat / newfstatat / reboot 四个 Hook。")
+          print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
+          PYHOOK
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
@@ -630,14 +697,10 @@ jobs:
             for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
               if ! grep -q "^${sym}=y$" out/.config; then
                 echo "::error::gki_defconfig 后 ${sym}=y 未生效；停止编译以避免生成不含完整 SUSFS 的内核"
-                grep -E "^(CONFIG_KSU_SUSFS|# CONFIG_KSU_SUSFS|CONFIG_KSU_HACK_ARM64_BRANCH_LINK|# CONFIG_KSU_HACK_ARM64_BRANCH_LINK)" out/.config || true
+                grep -E "^(CONFIG_KSU_SUSFS|# CONFIG_KSU_SUSFS)" out/.config || true
                 exit 1
               fi
             done
-            if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]] && ! grep -q '^CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y$' out/.config; then
-              echo "::error::SukiSU builtin 的 ARM64 branch-link hook 未在最终 .config 启用"
-              exit 1
-            fi
             echo "✅ SUSFS 配置前置校验通过，开始编译 Image"
           fi
 
