@@ -23,7 +23,7 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
+        description: '是否开启susfs(注意: SukiSU Ultra 分支源码原生不支持susfs，选择sukisu时此项无效)'
         required: true
         type: boolean
         default: 'true'
@@ -321,52 +321,35 @@ jobs:
           fi
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: inputs.susfs_enable
+        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'sukisu' && github.event.inputs.ksu_type != 'none' }}
         run: |
           cd kernel_workspace
-          if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
-            echo "正在添加susfs补丁..."
-            # 使用 cctv18/susfs4oki 的 oki 分支（OKI 适配版），与 6.6.89 及其他 6.6.x workflow 对齐。
-            # gitlab simonpunk 的 gki 分支已于 2026-08-30 bump 到 v2.3.0，其 fs/proc/base.c
-            # Hunk #1（#include <linux/susfs.h>，定位在第 101 行）不再匹配 OKI 内核的 base.c
-            # 上下文，导致宏未声明、fs/proc/base.o 编译失败。oki 分支的 Hunk #1 定位在第 103 行
-            # （针对 OKI 多出的 include 调整过），且冻结在稳定的 v2.2.0（含 zygote_next 漏洞修复）。
-            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-            cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-            cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
-            cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-            cd ./common
-            patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-            # 注：50_add 对 fs/proc/task_mmu.c 的 Hunk #6 会被拒绝（日志出现 "1 out of 9 hunks FAILED" + .rej），
-            # 这是冗余无害的：当前 OKI 6.6.118 的 show_smaps_rollup 已把两处 "Case 4 above" 合并为一处，
-            # Hunk #6 的目标位置已不存在；同文件 Hunk #7 已在新位置正确补上同样的 SUS_MAP 保护，
-            # 故 SUS_MAP 在 /proc/pid/smaps_rollup 的隐藏功能完整，无需处理该 .rej。
-            patch -p1 -N -F 3 < 69_hide_stuff.patch || true
-            cd ..
-          else
-            echo "已选择无内置KernelSU模式，跳过susfs配置..."
-          fi
+          echo "正在添加susfs补丁..."
+          # 使用 cctv18/susfs4oki 的 oki 分支（OKI 适配版），与 6.6.89 及其他 6.6.x workflow 对齐。
+          # gitlab simonpunk 的 gki 分支已于 2026-08-30 bump 到 v2.3.0，其 fs/proc/base.c
+          # Hunk #1（#include <linux/susfs.h>，定位在第 101 行）不再匹配 OKI 内核的 base.c
+          # 上下文，导致宏未声明、fs/proc/base.o 编译失败。oki 分支的 Hunk #1 定位在第 103 行
+          # （针对 OKI 多出的 include 调整过），且冻结在稳定的 v2.2.0（含 zygote_next 漏洞修复）。
+          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cd ./common
+          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+          # 注：50_add 对 fs/proc/task_mmu.c 的 Hunk #6 会被拒绝（日志出现 "1 out of 9 hunks FAILED" + .rej），
+          # 这是冗余无害的：当前 OKI 6.6.118 的 show_smaps_rollup 已把两处 "Case 4 above" 合并为一处，
+          # Hunk #6 的目标位置已不存在；同文件 Hunk #7 已在新位置正确补上同样的 SUS_MAP 保护，
+          # 故 SUS_MAP 在 /proc/pid/smaps_rollup 的隐藏功能完整，无需处理该 .rej。
+          patch -p1 -N -F 3 < 69_hide_stuff.patch || true
+          cd ..
           if [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在为原版 KernelSU (tiann/KernelSU)添加补丁..."
             cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
             cd ./KernelSU
             patch -p1 < 10_enable_susfs_for_ksu.patch || true
-          elif [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
-            # ReSukiSU 已原生集成完整 SUSFS 支持，无需任何 bridge 补丁：
-            #   - kernel/Kconfig 含 config KSU_SUSFS（在 "KernelSU Hooking Method" choice 内）
-            #     及全部子配置（SUS_PATH/SUS_MOUNT/SUS_KSTAT/SPOOF_UNAME/OPEN_REDIRECT/SUS_MAP 等）
-            #   - kernel/supercall/supercall.c 含 ksu_handle_sys_reboot() 全局函数，
-            #     当 magic2 == SUSFS_MAGIC 时路由到 ksu_handle_susfs_cmd()
-            #   - kernel/supercall/dispatch.c 含 ksu_handle_susfs_cmd()，
-            #     处理全部 CMD_SUSFS_* 命令（ADD_SUS_PATH / SET_UNAME / ADD_SUS_KSTAT 等）
-            #   - kernel/feature/selinux_hide.c 用 __maybe_static 暴露 ksu_selinux_hide_running
-            #   - kernel/runtime/ksud_integration.c 定义 ksu_is_input_hook_enabled (static_key)
-            # bridge 补丁 01-04 是为缺失 SUSFS 的 SukiSU-Ultra main 设计的，对 ReSukiSU 会造成：
-            #   - 01 重复定义 KSU_SUSFS → Kconfig recursive dependency（choice 内已有）
-            #   - 03 修改 supercall.c/dispatch.c 失败（ReSukiSU 结构与补丁预期不同）
-            # 故对 sukisu/resukisu（均重定向到 ReSukiSU）跳过全部 bridge 补丁。
-            # 与 6.6.89 workflow 对齐。
+          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
+            # ReSukiSU 已原生集成完整 SUSFS 支持，无需任何 bridge 补丁
             echo "ReSukiSU 已原生集成 SUSFS（Kconfig+supercall+dispatch+selinux_hide），跳过 bridge 补丁 01-04..."
           fi
           
@@ -409,7 +392,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: inputs.susfs_enable
+        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'sukisu' }}
         run: |
           cd kernel_workspace
           # 只写 ReSukiSU Kconfig 实际支持的 10 项 SUSFS CONFIG（完整核心隐藏功能）。
@@ -432,17 +415,24 @@ jobs:
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
+          
+          # 如果未开启susfs 或 选择了SukiSU Ultra（原生不支持SUSFS），则强制设为n
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" || "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
+
           # 开启原生 KPM（仅 SukiSU / ReSukiSU 支持，直接编译进内核，无需刷入 KP-Next 模块）
           if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
             if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" || "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
-              echo "CONFIG_KSU_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KALLSYMS=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KALLSYMS_ALL=y" >> ./common/arch/arm64/configs/gki_defconfig
+              echo "CONFIG_KPROBES=y" >> ./common/arch/arm64/configs/gki_defconfig
             else
               echo "::warning::当前选择的 KSU 分支不支持原生 KPM，已跳过开启 KPM"
             fi
           fi
+
           #添加对 Mountify (backslashxx/mountify) 模块的支持
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -724,7 +714,7 @@ jobs:
           df -h
 
       - name: 硬性验证 SUSFS 关键 CONFIG 已编入最终 .config
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'sukisu' && github.event.inputs.ksu_type != 'none' }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -930,7 +920,7 @@ jobs:
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. 当前内核的 KPM 功能已通过源码直接编译内置（仅 SukiSU / ReSukiSU 支持），无需刷入额外 KPN 模块。
+          6. 当前内核的 KPM 功能已通过源码直接编译内置（仅 SukiSU / ReSukiSU 支持），无需刷入额外 KPN 模块。若选择了 SukiSU Ultra 分支，因其原生不支持 SUSFS，即使勾选了开启也会自动跳过。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
