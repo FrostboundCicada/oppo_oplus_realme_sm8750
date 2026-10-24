@@ -341,9 +341,9 @@ jobs:
 
             echo "===== KPM patch repository references ====="
             grep -RnsE 'KernelPatch|KPM.*patch|kpm.*patch' \
-  ../ --include='*.sh' --include='*.yml' \
-  --include='*.yaml' --include='*.patch' \
-  --exclude-dir=.git 2>/dev/null | head -n 100 || true
+            ../ --include='*.sh' --include='*.yml' \
+            --include='*.yaml' --include='*.patch' \
+            --exclude-dir=.git 2>/dev/null | head -n 100 || true
 
       - name: 应用 KernelSU & SUSFS 补丁
         if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
