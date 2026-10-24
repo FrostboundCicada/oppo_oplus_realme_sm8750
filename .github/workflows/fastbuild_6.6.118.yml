@@ -464,27 +464,43 @@ jobs:
           print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
           PYHOOK
 
-      - name: 检查 KernelPatch 工具
+      - name: 诊断 KernelPatch 文件路径
         shell: bash
         run: |
-          set -euo pipefail
-
+          set -u
           cd "$GITHUB_WORKSPACE"
 
-          test -s kpm_patch/kpimg
-          test -s kpm_patch/kptools-linux
-          chmod +x kpm_patch/kptools-linux
+          echo "===== 仓库根目录 ====="
+          pwd
+          ls -lah
 
-          echo "===== 工具版本 ====="
-          ./kpm_patch/kptools-linux --version
+          echo "===== 检查 kpimg ====="
+          if [[ -s kpm_patch/kpimg ]]; then
+            ls -lh kpm_patch/kpimg
+            file kpm_patch/kpimg
+          else
+            echo "::error::找不到 kpm_patch/kpimg，或文件大小为 0"
+          fi
 
-          echo "===== kpimg 信息 ====="
-          ./kpm_patch/kptools-linux \
-            --list \
-            --kpimg kpm_patch/kpimg
+          echo "===== 检查 kptools-linux ====="
+          if [[ -s kpm_patch/kptools-linux ]]; then
+            ls -lh kpm_patch/kptools-linux
+            file kpm_patch/kptools-linux
+          else
+            echo "::error::找不到 kpm_patch/kptools-linux，或文件大小为 0"
+          fi
 
-          echo "===== 内核镜像 ====="
-          ls -lh kernel_workspace/common/out/arch/arm64/boot/Image
+          echo "===== 搜索实际文件位置 ====="
+          find "$GITHUB_WORKSPACE" -type f \
+            \( -name 'kpimg' -o -name 'kptools-linux' \) \
+            -print 2>/dev/null || true
+
+          echo "===== 检查编译产物 ====="
+          if [[ -s kernel_workspace/common/out/arch/arm64/boot/Image ]]; then
+            ls -lh kernel_workspace/common/out/arch/arm64/boot/Image
+          else
+            echo "::error::找不到编译后的 Image"
+          fi
     
       - name: 测试 KernelPatch 注入
         shell: bash
