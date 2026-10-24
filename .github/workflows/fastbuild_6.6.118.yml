@@ -399,19 +399,55 @@ jobs:
 
           # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
-              "common/fs/exec.c": ["ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"],
-              "common/fs/open.c": ["ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"],
-              "common/fs/stat.c": ["ksu_handle_stat(&dfd, &filename, &flag);"],
-              "common/kernel/reboot.c": ["ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"]
-          }
-          for path, needles in checks.items():
-              content = Path(path).read_text()
-              for needle in needles:
-                  if content.count(needle) != 1:
-                      raise SystemExit(f"::error::Hook 验证失败：{path} 中 {needle!r} 出现 {content.count(needle)} 次")
-          print("已验证 execveat / faccessat / newfstatat / reboot 四个 Hook。")
-          print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
+    "common/fs/exec.c": [
+        "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
+    ],
+    "common/fs/open.c": [
+        "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
+    ],
+    "common/fs/stat.c": [
+        "ksu_handle_stat(&dfd, &filename, &flag);"
+    ],
+    "common/kernel/reboot.c": [
+        "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"
+    ]
+}
+
+failed = False
+
+for path, needles in checks.items():
+    content = Path(path).read_text()
+    for needle in needles:
+        count = content.count(needle)
+        print(f"{path}: {needle} -> {count} 次")
+
+        if count != 1:
+            print(
+                f"::error::Hook 验证失败：{path} 中调用语句出现 {count} 次，"
+                "需要检查具体位置，不能自动忽略"
+            )
+            failed = True
+
+if failed:
+    raise SystemExit(1)
+
+print("四个 Hook 的调用语句均通过数量检查。")
           PYHOOK
+      - name: 诊断重复的 execveat Hook
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          echo "===== execveat Hook 出现位置 ====="
+          grep -n -B 8 -A 8 \
+            'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' \
+            kernel_workspace/common/fs/exec.c || true
+
+          echo "===== 所有相关调用 ====="
+          grep -Rns \
+            'ksu_handle_execveat' \
+            kernel_workspace/common/fs \
+            kernel_workspace/KernelSU \
+            2>/dev/null || true
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
