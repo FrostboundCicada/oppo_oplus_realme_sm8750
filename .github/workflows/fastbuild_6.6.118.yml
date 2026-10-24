@@ -399,39 +399,39 @@ jobs:
 
           # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
-    "common/fs/exec.c": [
-        "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
+            "common/fs/exec.c": [
+             "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
     ],
-    "common/fs/open.c": [
-        "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
+            "common/fs/open.c": [
+             "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
     ],
-    "common/fs/stat.c": [
-        "ksu_handle_stat(&dfd, &filename, &flag);"
+            "common/fs/stat.c": [
+             "ksu_handle_stat(&dfd, &filename, &flag);"
     ],
-    "common/kernel/reboot.c": [
-        "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"
+            "common/kernel/reboot.c": [
+             "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"
     ]
 }
 
-failed = False
+          failed = False
 
-for path, needles in checks.items():
-    content = Path(path).read_text()
-    for needle in needles:
-        count = content.count(needle)
-        print(f"{path}: {needle} -> {count} 次")
+          for path, needles in checks.items():
+            content = Path(path).read_text()
+            for needle in needles:
+              count = content.count(needle)
+              print(f"{path}: {needle} -> {count} 次")
 
-        if count != 1:
-            print(
+              if count != 1:
+                 print(
                 f"::error::Hook 验证失败：{path} 中调用语句出现 {count} 次，"
                 "需要检查具体位置，不能自动忽略"
             )
             failed = True
 
-if failed:
-    raise SystemExit(1)
+         if failed:
+            raise SystemExit(1)
 
-print("四个 Hook 的调用语句均通过数量检查。")
+         print("四个 Hook 的调用语句均通过数量检查。")
           PYHOOK
       - name: 诊断重复的 execveat Hook
         if: ${{ always() }}
