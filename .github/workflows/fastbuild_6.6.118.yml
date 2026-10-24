@@ -350,104 +350,77 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "为 SukiSU builtin 接入 Linux 6.6 手动 Hooks（Android 15）..."
+          echo "为 SukiSU builtin 检查 Linux 6.6 手动 Hooks（Android 15）..."
           python3 - <<'PYHOOK'
           from pathlib import Path
-          import re, sys
+          import re
 
-          def insert_once(path, pattern, replacement, label):
+          def ensure_hook(path, pattern, marker, replacement, label):
               p = Path(path)
               text = p.read_text()
-              if replacement.strip() in text:
-                  print(f"✓ {label} 已存在，跳过")
+              count = text.count(marker)
+              if count == 1:
+                  print(f"✓ {label} 已存在且只出现一次，跳过插入")
                   return
+              if count > 1:
+                  raise SystemExit(
+                      f"::error::{label}: {path} 中已有 {count} 个调用，拒绝继续，避免重复 Hook"
+                  )
               matches = list(re.finditer(pattern, text, flags=re.S))
               if len(matches) != 1:
-                  raise SystemExit(f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个目标位置，拒绝盲目修改")
+                  raise SystemExit(
+                      f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个插入位置，拒绝盲目修改"
+                  )
               m = matches[0]
               text = text[:m.end()] + replacement + text[m.end():]
+              if text.count(marker) != 1:
+                  raise SystemExit(f"::error::{label}: 插入后调用数量异常")
               p.write_text(text)
               print(f"✓ 已插入 {label}")
 
-          # Linux 6.6 Android common: do_execveat_common has int retval; before first executable logic.
-          insert_once(
+          # 先检查调用标记再插入：如果 SUSFS 补丁已添加该 Hook，不会再重复插入。
+          ensure_hook(
               "common/fs/exec.c",
               r"(static int do_execveat_common\s*\([^)]*\)\s*\{(?:(?!\n\}).)*?\n\s*int retval;)",
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
               "execveat hook")
 
-          # Hook sys_faccessat (not do_faccessat) to keep the interception scope narrow.
-          insert_once(
+          ensure_hook(
               "common/fs/open.c",
               r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
+              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
               "faccessat hook")
 
-          # Hook sys_newfstatat, not vfs_statx().
-          insert_once(
+          ensure_hook(
               "common/fs/stat.c",
               r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
+              "ksu_handle_stat(&dfd, &filename, &flag);",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
               "newfstatat hook")
 
-          # New KernelSU supercall reboot hook.
-          insert_once(
+          ensure_hook(
               "common/kernel/reboot.c",
               r"(SYSCALL_DEFINE4\(reboot,\s*int,\s*magic1,\s*int,\s*magic2,\s*unsigned int,\s*cmd,\s*void __user \*,\s*arg\)\s*\{(?:(?!\n\}).)*?\n\s*int ret = 0;)",
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
               "\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\n\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif",
               "reboot hook")
 
-          # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
-            "common/fs/exec.c": [
-             "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"
-    ],
-            "common/fs/open.c": [
-             "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
-    ],
-            "common/fs/stat.c": [
-             "ksu_handle_stat(&dfd, &filename, &flag);"
-    ],
-            "common/kernel/reboot.c": [
-             "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"
-    ]
-}
-
-          failed = False
-
-          for path, needles in checks.items():
-            content = Path(path).read_text()
-            for needle in needles:
-              count = content.count(needle)
-              print(f"{path}: {needle} -> {count} 次")
-
+              "common/fs/exec.c": "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
+              "common/fs/open.c": "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
+              "common/fs/stat.c": "ksu_handle_stat(&dfd, &filename, &flag);",
+              "common/kernel/reboot.c": "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
+          }
+          for path, marker in checks.items():
+              count = Path(path).read_text().count(marker)
               if count != 1:
-                 print(
-                f"::error::Hook 验证失败：{path} 中调用语句出现 {count} 次，"
-                "需要检查具体位置，不能自动忽略"
-            )
-            failed = True
+                  raise SystemExit(f"::error::Hook 验证失败：{path} 中调用出现 {count} 次（要求恰好一次）")
+              print(f"✓ {path}: Hook 调用恰好一次")
 
-         if failed:
-            raise SystemExit(1)
-
-         print("四个 Hook 的调用语句均通过数量检查。")
+          print("四个 Hook 的文本数量检查通过。注意：这不等于内核已成功编译或 KPM 已可用。")
           PYHOOK
-      - name: 诊断重复的 execveat Hook
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          echo "===== execveat Hook 出现位置 ====="
-          grep -n -B 8 -A 8 \
-            'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' \
-            kernel_workspace/common/fs/exec.c || true
-
-          echo "===== 所有相关调用 ====="
-          grep -Rns \
-            'ksu_handle_execveat' \
-            kernel_workspace/common/fs \
-            kernel_workspace/KernelSU \
-            2>/dev/null || true
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
