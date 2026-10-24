@@ -464,6 +464,28 @@ jobs:
           print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
           PYHOOK
 
+      - name: 检查 KernelPatch 工具
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE"
+
+          test -s kpm_patch/kpimg
+          test -s kpm_patch/kptools-linux
+          chmod +x kpm_patch/kptools-linux
+
+          echo "===== 工具版本 ====="
+          ./kpm_patch/kptools-linux --version
+
+          echo "===== kpimg 信息 ====="
+          ./kpm_patch/kptools-linux \
+            --list \
+            --kpimg kpm_patch/kpimg
+
+          echo "===== 内核镜像 ====="
+          ls -lh kernel_workspace/common/out/arch/arm64/boot/Image
+     
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
