@@ -485,7 +485,38 @@ jobs:
 
           echo "===== 内核镜像 ====="
           ls -lh kernel_workspace/common/out/arch/arm64/boot/Image
-     
+    
+      - name: 测试 KernelPatch 注入
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE"
+
+          IMAGE="kernel_workspace/common/out/arch/arm64/boot/Image"
+          ORIGINAL="${IMAGE}.original"
+          OUTPUT="kernel_workspace/common/out/arch/arm64/boot/oImage"
+
+          test -s "$IMAGE"
+          cp "$IMAGE" "$ORIGINAL"
+
+          ./kpm_patch/kptools-linux \
+            --patch \
+            --image "$ORIGINAL" \
+            --kpimg kpm_patch/kpimg \
+            --out "$OUTPUT"
+
+          test -s "$OUTPUT"
+
+          echo "===== 镜像对比 ====="
+          ls -lh "$ORIGINAL" "$OUTPUT"
+          sha256sum "$ORIGINAL" "$OUTPUT"
+
+          echo "===== 检查补丁信息 ====="
+          ./kpm_patch/kptools-linux \
+            --list \
+            --image "$OUTPUT"
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
