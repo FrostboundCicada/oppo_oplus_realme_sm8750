@@ -332,18 +332,30 @@ jobs:
         run: |
           cd kernel_workspace
           echo "正在添加susfs补丁..."
-          SUSFS_BRANCH="oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
-          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b "$SUSFS_BRANCH"
+          # 使用 SUSFS 上游官方仓库，不再从 cctv18/susfs4oki 派生仓库拉取。
+          SUSFS_BRANCH="gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
+          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          git clone --depth=1 --branch "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu
           SUSFS_COMMIT=$(git -C susfs4ksu rev-parse HEAD)
+          SUSFS_REMOTE_COMMIT=$(git ls-remote "$SUSFS_REPO" "refs/heads/$SUSFS_BRANCH" | awk 'NR==1 {print $1}')
+          if [[ -z "$SUSFS_REMOTE_COMMIT" || "$SUSFS_COMMIT" != "$SUSFS_REMOTE_COMMIT" ]]; then
+            echo "::error::SUSFS checkout 与官方仓库分支最新提交不一致（$SUSFS_BRANCH）"
+            exit 1
+          fi
           echo "SUSFS_BRANCH=$SUSFS_BRANCH" >> "$GITHUB_ENV"
           echo "SUSFS_COMMIT=$SUSFS_COMMIT" >> "$GITHUB_ENV"
-          echo "SUSFS 最新分支提交：$SUSFS_BRANCH @ $SUSFS_COMMIT"
+          echo "SUSFS 官方上游最新提交：$SUSFS_REPO @ $SUSFS_BRANCH @ $SUSFS_COMMIT"
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+          SUSFS_KERNEL_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch"
+          if [[ ! -s "$SUSFS_KERNEL_PATCH" ]]; then
+            echo "::error::官方 SUSFS 分支缺少适用于 ${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} 的内核补丁：$SUSFS_KERNEL_PATCH"
+            exit 1
+          fi
+          cp "$SUSFS_KERNEL_PATCH" ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
           cd ..
           if [[ "${{ github.event.inputs.ksu_type }}" == "ksu" ]]; then
