@@ -252,6 +252,13 @@ jobs:
             echo "SukiSU 集成分支：$SUKISU_BRANCH"
             curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- "$SUKISU_BRANCH"
 
+            # 与远端分支头比对，确保不是 setup 脚本缓存或旧 checkout。
+            git -C ./KernelSU fetch --depth=1 origin "$SUKISU_BRANCH"
+            if [[ "$(git -C ./KernelSU rev-parse HEAD)" != "$(git -C ./KernelSU rev-parse FETCH_HEAD)" ]]; then
+              echo "::error::SukiSU checkout 不是构建时远端 $SUKISU_BRANCH 分支最新提交"
+              exit 1
+            fi
+
             # 不允许 setup 脚本静默回退到其他分支；确认实际 checkout 和必要 Kconfig 均存在。
             if [[ ! -d ./KernelSU/.git ]]; then
               echo "::error::SukiSU setup 后未找到 ./KernelSU Git 仓库"
@@ -325,7 +332,12 @@ jobs:
         run: |
           cd kernel_workspace
           echo "正在添加susfs补丁..."
-          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+          SUSFS_BRANCH="oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
+          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b "$SUSFS_BRANCH"
+          SUSFS_COMMIT=$(git -C susfs4ksu rev-parse HEAD)
+          echo "SUSFS_BRANCH=$SUSFS_BRANCH" >> "$GITHUB_ENV"
+          echo "SUSFS_COMMIT=$SUSFS_COMMIT" >> "$GITHUB_ENV"
+          echo "SUSFS 最新分支提交：$SUSFS_BRANCH @ $SUSFS_COMMIT"
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -591,7 +603,7 @@ jobs:
               echo "CONFIG_BT_HCIVHCI=y" >> ./arch/arm64/configs/gki_defconfig
               echo "CONFIG_STATIC_USERMODEHELPER=n" >> ./arch/arm64/configs/gki_defconfig
               wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/evdi_drm.patch
-              patch -p1 -F 3 < evdi_drm.patch || true
+              patch -p1 -F 3 < evdi_drm.patch
               echo "CONFIG_DRM_LINDROID_EVDI=y" >> ./arch/arm64/configs/gki_defconfig
             fi
           fi
@@ -926,6 +938,10 @@ jobs:
             echo "SukiSU Commit: ${SUKISU_COMMIT}" >> ./ak3.log
           fi
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
+            echo "SUSFS Branch: ${SUSFS_BRANCH}" >> ./ak3.log
+            echo "SUSFS Commit: ${SUSFS_COMMIT}" >> ./ak3.log
+          fi
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
