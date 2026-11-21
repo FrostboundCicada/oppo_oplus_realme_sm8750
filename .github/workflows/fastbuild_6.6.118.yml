@@ -276,19 +276,33 @@ jobs:
             fi
             echo "SukiSU-Nova 分支：$SUKISU_BRANCH"
             echo "SukiSU-Nova 最新提交：$SUKISU_REMOTE_HEAD"
-            curl -fLSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" | bash -s -- "$SUKISU_REMOTE_HEAD"
 
-            # setup.sh 会尝试切换到指定提交；这里以 GitHub 官方分支 HEAD 为准做精确校验。
-            if [[ ! -d ./KernelSU/.git ]]; then
-              echo "::error::SukiSU-Nova setup 后未找到 ./KernelSU Git 仓库"
+            # 不调用上游 setup.sh：该脚本目前仍从旧的第三方 Git 镜像克隆，
+            # 镜像缺少官方最新 commit。直接从官方 GitHub 仓库检出目标分支。
+            if [[ -e ./KernelSU ]]; then
+              echo "::error::检测到残留 ./KernelSU 路径，拒绝覆盖未知源码"
               exit 1
             fi
+            git clone --depth=1 --branch "$SUKISU_BRANCH" "$SUKISU_REPO" ./KernelSU
             SUKISU_COMMIT=$(git -C ./KernelSU rev-parse HEAD)
             if [[ "$SUKISU_COMMIT" != "$SUKISU_REMOTE_HEAD" ]]; then
-              echo "::error::SukiSU-Nova 源码与官方 $SUKISU_BRANCH 最新提交不一致：期望 $SUKISU_REMOTE_HEAD，实际 $SUKISU_COMMIT"
-              git -C ./KernelSU remote -v || true
+              echo "::error::SukiSU-Nova 官方分支在解析与克隆期间发生变化，或检出不一致：期望 $SUKISU_REMOTE_HEAD，实际 $SUKISU_COMMIT"
               exit 1
             fi
+
+            # 等价复现官方 setup.sh 的 GKI 驱动目录集成步骤。
+            if [[ ! -d ./common/drivers || ! -f ./common/drivers/Makefile || ! -f ./common/drivers/Kconfig ]]; then
+              echo "::error::GKI common/drivers 目录结构不完整，无法接入 SukiSU-Nova"
+              exit 1
+            fi
+            if [[ -e ./common/drivers/kernelsu || -L ./common/drivers/kernelsu ]]; then
+              echo "::error::common/drivers/kernelsu 已存在，拒绝覆盖"
+              exit 1
+            fi
+            ln -s "$(realpath --relative-to=./common/drivers ./KernelSU/kernel)" ./common/drivers/kernelsu
+            grep -q "kernelsu" ./common/drivers/Makefile || printf '\\nobj-$(CONFIG_KSU) += kernelsu/\\n' >> ./common/drivers/Makefile
+            grep -q 'source "drivers/kernelsu/Kconfig"' ./common/drivers/Kconfig || sed -i '/endmenu/i\\source "drivers/kernelsu/Kconfig"' ./common/drivers/Kconfig
+
             if [[ "$SUKISU_BRANCH" == "builtin" ]]; then
               if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_SUSFS([[:space:]]|$)' ./KernelSU/kernel; then
                 echo "::error::官方 builtin 源码中未找到 CONFIG_KSU_SUSFS 的 Kconfig 定义"
