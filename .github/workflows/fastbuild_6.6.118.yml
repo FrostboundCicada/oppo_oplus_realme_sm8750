@@ -23,7 +23,7 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启SUSFS（SukiSU Ultra 使用官方 builtin 分支并启用 ARM64 branch-link hook；其他分支沿用各自补丁流程）'
+        description: '是否开启SUSFS（SukiSU Ultra 使用官方 builtin 分支；SUSFS 自带的文件系统 Hooks 与其余手动 Hooks 分开验证）'
         required: true
         type: boolean
         default: 'true'
@@ -244,7 +244,7 @@ jobs:
           if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "正在配置 SukiSU Ultra 官方最新提交..."
             if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
-              # 官方 builtin 分支携带 SUSFS Kconfig；ARM64 显式启用 branch-link 后跳过全部手动 Hooks。
+              # 官方 builtin 分支携带 SUSFS Kconfig；按 builtin 实际接口验证 Hooks，不假设存在其他分支的 Kconfig 选项。
               SUKISU_BRANCH="builtin"
             else
               SUKISU_BRANCH="main"
@@ -368,25 +368,81 @@ jobs:
             echo "SukiSU builtin 自带 SUSFS Kconfig；已应用内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
           fi
           
-      - name: 验证 SukiSU builtin ARM64 branch-link 集成
+      - name: 验证 SukiSU builtin 与 SUSFS 文件系统 Hooks
         if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
         working-directory: kernel_workspace
         shell: bash
         run: |
           set -euo pipefail
-          if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_HACK_ARM64_BRANCH_LINK([[:space:]]|$)' ./KernelSU/kernel; then
-            echo "::error::SukiSU builtin 未定义 CONFIG_KSU_HACK_ARM64_BRANCH_LINK"
-            exit 1
-          fi
-          if ! grep -qx 'CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y' common/arch/arm64/configs/gki_defconfig; then
-            echo "::error::gki_defconfig 未显式启用 ARM64 branch-link hook"
-            exit 1
-          fi
-          if ! grep -qx 'CONFIG_KALLSYMS=y' common/arch/arm64/configs/gki_defconfig; then
-            echo "::error::ARM64 branch-link hook 依赖的 CONFIG_KALLSYMS=y 未显式启用"
-            exit 1
-          fi
-          echo "✓ 已选择官方 ARM64 branch-link hook；不再插入与 CONFIG_KSU_SUSFS 函数签名不兼容的手动 Hooks"
+          python3 - <<'PYHOOK'
+          from pathlib import Path
+          import re
+
+          def call_lines(source, symbol):
+              pattern = re.compile(
+                  rf"(?m)^[ \\t]*(?!extern\\b)(?!int\\b)(?!long\\b)(?!void\\b)"
+                  rf"(?!static\\b)[^\\n]*\\b{re.escape(symbol)}\\s*\\("
+              )
+              return [line for line in source.splitlines() if pattern.search(line)]
+
+          def require_susfs_call(path, symbol, label):
+              p = Path(path)
+              source = p.read_text()
+              calls = call_lines(source, symbol)
+              if len(calls) != 1:
+                  related = [
+                      f"{i}: {line}" for i, line in enumerate(source.splitlines(), 1)
+                      if symbol in line
+                  ]
+                  raise SystemExit(
+                      f"::error::{label}: SUSFS 提供的 {path} 调用数为 {len(calls)}（要求恰好一次）。"
+                      f"相关源码行：\\n" + "\\n".join(related[:20])
+                  )
+              print(f"✓ {label}: SUSFS 已提供唯一调用：{calls[0].strip()}")
+
+          def ensure_manual_call(path, pattern, symbol, marker, replacement, label):
+              p = Path(path)
+              source = p.read_text()
+              calls = call_lines(source, symbol)
+              if len(calls) == 1:
+                  print(f"✓ {label}: 已存在唯一调用，跳过插入")
+                  return
+              if len(calls) > 1:
+                  raise SystemExit(f"::error::{label}: {path} 中已有 {len(calls)} 个调用，拒绝重复插桩")
+              matches = list(re.finditer(pattern, source, flags=re.S))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"::error::{label}: {path} 插入位置匹配到 {len(matches)} 处，拒绝盲目修改"
+                  )
+              m = matches[0]
+              source = source[:m.end()] + replacement + source[m.end():]
+              p.write_text(source)
+              if len(call_lines(source, symbol)) != 1:
+                  raise SystemExit(f"::error::{label}: 插入后调用数不等于 1")
+              print(f"✓ {label}: 已插入唯一调用")
+
+          # SUSFS v2 的 fs/open.c 与 fs/stat.c 可能已经包含自己的 sucompat Hooks。
+          # 不再向这两个文件追加旧式 const char __user ** 声明，避免与 struct filename ** API 冲突。
+          require_susfs_call("common/fs/open.c", "ksu_handle_faccessat", "faccessat")
+          require_susfs_call("common/fs/stat.c", "ksu_handle_stat", "newfstatat")
+
+          # 其余入口按当前 builtin 源码检查；仅缺失时插入，已有调用时绝不重复。
+          ensure_manual_call(
+              "common/fs/exec.c",
+              r"(static int do_execveat_common\\s*\\([^)]*\\)\\s*\\{(?:(?!\\n\\}).)*?\\n\\s*int retval;)",
+              "ksu_handle_execveat",
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
+              "\\n#ifdef CONFIG_KSU\\n\\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\\n\\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\\n#endif",
+              "execveat hook")
+
+          ensure_manual_call(
+              "common/kernel/reboot.c",
+              r"(SYSCALL_DEFINE4\\(reboot,\\s*int,\\s*magic1,\\s*int,\\s*magic2,\\s*unsigned int,\\s*cmd,\\s*void __user \\*,\\s*arg\\)\\s*\\{(?:(?!\\n\\}).)*?\\n\\s*int ret = 0;)",
+              "ksu_handle_sys_reboot",
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
+              "\\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\\n\\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\\n\\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\\n#endif",
+              "reboot hook")
+          PYHOOK
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
@@ -445,18 +501,7 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
 
-          # SukiSU builtin + SUSFS 时使用官方 ARM64 branch-link hook。
-          # 该模式替代 execve / faccessat / newfstatat / reboot 等全部手动插桩。
-          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" && "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
-            if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_HACK_ARM64_BRANCH_LINK([[:space:]]|$)' ./KernelSU/kernel; then
-              echo "::error::当前 SukiSU builtin 源码未提供 CONFIG_KSU_HACK_ARM64_BRANCH_LINK，拒绝回退到不匹配的手动 Hook"
-              exit 1
-            fi
-            echo "CONFIG_KALLSYMS=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "已显式启用 SukiSU ARM64 branch-link hook"
-          fi
-          
+
           if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
@@ -723,10 +768,6 @@ jobs:
             for sym in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
               require_y "$sym"
             done
-            if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-              require_y CONFIG_KALLSYMS
-              require_y CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-            fi
           elif [[ "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
             require_y CONFIG_KSU
           fi
@@ -756,14 +797,6 @@ jobs:
                 exit 1
               fi
             done
-            if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-              for sym in CONFIG_KALLSYMS CONFIG_KSU_HACK_ARM64_BRANCH_LINK; do
-                if ! grep -q "^${sym}=y$" out/.config; then
-                  echo "::error::gki_defconfig 后 ${sym}=y 未生效；停止编译，禁止回退到不兼容的手动 Hooks"
-                  exit 1
-                fi
-              done
-            fi
             echo "✅ SUSFS 与 SukiSU branch-link 配置前置校验通过，开始编译 Image"
           fi
 
@@ -857,17 +890,6 @@ jobs:
               echo "✓ ${sym} = y"
             fi
           done
-          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-            for sym in CONFIG_KALLSYMS CONFIG_KSU_HACK_ARM64_BRANCH_LINK; do
-              line=$(grep -E "^${sym}=" "$CONFIG" || true)
-              if [[ "$line" != "${sym}=y" ]]; then
-                echo "::error::${sym} 未以 =y 编入最终 .config（实际值: '${line:-未找到}'）"
-                fail=1
-              else
-                echo "✓ ${sym} = y"
-              fi
-            done
-          fi
           if [[ $fail -ne 0 ]]; then
             echo "::error::SUSFS 关键功能未全部编入内核"
             exit 1
@@ -1057,7 +1079,7 @@ jobs:
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
           - SukiSU 官方提交：${{ needs.build.outputs.sukisu_commit }}
-          - SukiSU 勾选 SUSFS 时使用官方 builtin 集成分支并启用 ARM64 branch-link hook；关闭时使用官方 main 分支。
+          - SukiSU 勾选 SUSFS 时使用官方 builtin 集成分支；文件系统 Hook 由 SUSFS 源码负责，其余入口按 builtin 实际源码检查。
           
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
@@ -1065,7 +1087,7 @@ jobs:
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU Ultra 勾选 SUSFS 时会切换到官方 builtin 分支，启用 ARM64 branch-link hook，并在 Image 编译前验证最终 .config。
+          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU Ultra 勾选 SUSFS 时切换到官方 builtin 分支，并分别验证 SUSFS 文件系统 Hooks 与其他手动 Hooks。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
