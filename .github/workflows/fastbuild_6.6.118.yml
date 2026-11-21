@@ -730,7 +730,7 @@ jobs:
           require_y() {
             local sym="$1"
             if ! grep -qx "${sym}=y" "$CONFIG"; then
-              echo "::error::${sym} 未编入最终内核配置（期望 =y，实际：$(grep -E "^( ${sym}=|# ${sym} is not set)" "$CONFIG" || echo 未定义)）"
+              echo "::error::${sym} 未编入最终内核配置（期望 =y，实际：$(grep -E "^(${sym}=|# ${sym} is not set)" "$CONFIG" || echo 未定义)）"
               exit 1
             fi
             echo "✓ ${sym}=y"
