@@ -397,7 +397,7 @@ jobs:
 
           path = Path("common/fs/exec.c")
           source = path.read_text()
-          anchor = "#ifdef CONFIG_KSU_SUSFS\\nextern struct static_key_true ksu_su_compat_enabled;"
+          anchor = "#ifdef CONFIG_KSU_SUSFS\nextern struct static_key_true ksu_su_compat_enabled;"
           if source.count(anchor) != 1:
               raise SystemExit("::error::SUSFS exec.c preinit guard insertion point must match exactly once")
           if "ksu_setup_preinit_file" not in source or "ksu_preinit_handle_post_execveat" not in source:
@@ -407,7 +407,7 @@ jobs:
 
           source = source.replace(
               anchor,
-              "#define KSU_NO_PREINIT 1\\n" + anchor,
+              "#define KSU_NO_PREINIT 1\n" + anchor,
               1,
           )
           if source.count("#define KSU_NO_PREINIT 1") != 1:
