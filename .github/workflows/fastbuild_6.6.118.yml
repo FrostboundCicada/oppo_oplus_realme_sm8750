@@ -725,30 +725,30 @@ jobs:
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/ddl_hit_hook.patch
             patch --batch --forward -p1 -F 3 < ddl_hit_hook.patch
             python3 - <<'PYDDL'
-            from pathlib import Path
-            import re
+          from pathlib import Path
+          import re
 
-            p = Path("kernel/module/main.c")
-            if not p.is_file():
-                raise SystemExit("::error::ddl_hit_hook.patch 后未找到 kernel/module/main.c")
-            source = p.read_text()
-            required = {
-                "bounds-checked replacement": r"void update_ddl_hit_history_new\s*\(struct task_struct \*p\)",
-                "PID upper-bound guard": r"p->pid\s*>=\s*PID_MAX_DEFAULT",
-                "data symbol lookup": r'kallsyms_lookup_name\("ddl_sdata"\)',
-                "original function lookup": r'kallsyms_lookup_name\("update_ddl_hit_history"\)',
-                "module name guard": r'strcmp\(mod->name,\s*"oplus_bsp_sched_assist"\)',
-                "module-load hook": r"hook_sched_assist_module\(mod\);",
-                "ARM64 text patch": r"aarch64_insn_patch_text_nosync",
-            }
-            for label, pattern in required.items():
-                hits = len(re.findall(pattern, source))
-                if hits != 1:
-                    raise SystemExit(f"::error::ddl_hit_hook semantic check failed: {label}, expected 1 match, got {hits}")
-            if "ddl_hit_hook: update_ddl_hit_history patched" not in source:
-                raise SystemExit("::error::ddl_hit_hook success log marker missing")
-            print("✓ ddl_hit_hook.patch semantic verification passed (PID bounds, target symbol, module guard, ARM64 hook)")
-            PYDDL
+          p = Path("kernel/module/main.c")
+          if not p.is_file():
+              raise SystemExit("::error::ddl_hit_hook.patch 后未找到 kernel/module/main.c")
+          source = p.read_text()
+          required = {
+              "bounds-checked replacement": r"void update_ddl_hit_history_new\s*\(struct task_struct \*p\)",
+              "PID upper-bound guard": r"p->pid\s*>=\s*PID_MAX_DEFAULT",
+              "data symbol lookup": r'kallsyms_lookup_name\("ddl_sdata"\)',
+              "original function lookup": r'kallsyms_lookup_name\("update_ddl_hit_history"\)',
+              "module name guard": r'strcmp\(mod->name,\s*"oplus_bsp_sched_assist"\)',
+              "module-load hook": r"hook_sched_assist_module\(mod\);",
+              "ARM64 text patch": r"aarch64_insn_patch_text_nosync",
+          }
+          for label, pattern in required.items():
+              hits = len(re.findall(pattern, source))
+              if hits != 1:
+                  raise SystemExit(f"::error::ddl_hit_hook semantic check failed: {label}, expected 1 match, got {hits}")
+          if "ddl_hit_hook: update_ddl_hit_history patched" not in source:
+              raise SystemExit("::error::ddl_hit_hook success log marker missing")
+          print("✓ ddl_hit_hook.patch semantic verification passed (PID bounds, target symbol, module guard, ARM64 hook)")
+          PYDDL
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
             patch -p1 -F 3 < ntsync_base.patch || true
