@@ -380,8 +380,8 @@ jobs:
 
           def call_lines(source, symbol):
               pattern = re.compile(
-                  rf"(?m)^[ \\t]*(?!extern\\b)(?!int\\b)(?!long\\b)(?!void\\b)"
-                  rf"(?!static\\b)[^\\n]*\\b{re.escape(symbol)}\\s*\\("
+                  rf"(?m)^[ \t]*(?!extern\b)(?!int\b)(?!long\b)(?!void\b)"
+                  rf"(?!static\b)[^\n]*\b{re.escape(symbol)}\s*\("
               )
               return [line for line in source.splitlines() if pattern.search(line)]
 
@@ -396,7 +396,7 @@ jobs:
                   ]
                   raise SystemExit(
                       f"::error::{label}: SUSFS 提供的 {path} 调用数为 {len(calls)}（要求恰好一次）。"
-                      f"相关源码行：\\n" + "\\n".join(related[:20])
+                      f"相关源码行：\n" + "\n".join(related[:20])
                   )
               print(f"✓ {label}: SUSFS 已提供唯一调用：{calls[0].strip()}")
 
@@ -429,18 +429,18 @@ jobs:
           # 其余入口按当前 builtin 源码检查；仅缺失时插入，已有调用时绝不重复。
           ensure_manual_call(
               "common/fs/exec.c",
-              r"(static int do_execveat_common\\s*\\([^)]*\\)\\s*\\{(?:(?!\\n\\}).)*?\\n\\s*int retval;)",
+              r"(static int do_execveat_common\s*\([^)]*\)\s*\{(?:(?!\n\}).)*?\n\s*int retval;)",
               "ksu_handle_execveat",
               "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
-              "\\n#ifdef CONFIG_KSU\\n\\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\\n\\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\\n#endif",
+              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
               "execveat hook")
 
           ensure_manual_call(
               "common/kernel/reboot.c",
-              r"(SYSCALL_DEFINE4\\(reboot,\\s*int,\\s*magic1,\\s*int,\\s*magic2,\\s*unsigned int,\\s*cmd,\\s*void __user \\*,\\s*arg\\)\\s*\\{(?:(?!\\n\\}).)*?\\n\\s*int ret = 0;)",
+              r"(SYSCALL_DEFINE4\(reboot,\s*int,\s*magic1,\s*int,\s*magic2,\s*unsigned int,\s*cmd,\s*void __user \*,\s*arg\)\s*\{(?:(?!\n\}).)*?\n\s*int ret = 0;)",
               "ksu_handle_sys_reboot",
               "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
-              "\\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\\n\\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\\n\\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\\n#endif",
+              "\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\n\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif",
               "reboot hook")
           PYHOOK
 
