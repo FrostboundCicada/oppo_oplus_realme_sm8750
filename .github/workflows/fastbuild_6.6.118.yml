@@ -334,8 +334,8 @@ jobs:
 
             KSU_COMMIT_COUNT=$(curl --fail --silent --show-error --location --retry 3 --retry-delay 2 --head \
               "https://api.github.com/repos/SukiSU-Nova/SukiSU-Nova/commits?sha=$KSU_VERSION_BRANCH&per_page=1" \
-              | tr -d '\\r' \
-              | sed -nE 's/.*[?&]page=([0-9]+)>;[[:space:]]*rel="last".*/\\1/p' \
+              | tr -d '\r' \
+              | sed -nE 's/.*[?&]page=([0-9]+)>;[[:space:]]*rel="last".*/\1/p' \
               | tail -n1)
             if [[ ! "$KSU_COMMIT_COUNT" =~ ^[0-9]+$ ]]; then
               echo "::error::无法从 SukiSU-Nova 官方 API 获取 $KSU_VERSION_BRANCH 分支提交总数，拒绝生成错误版本号"
