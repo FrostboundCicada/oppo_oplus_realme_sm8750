@@ -7,26 +7,8 @@ env:
   SUB_VERSION: '118'
   KERNEL_NAME: 'android15-8-g29d86c5fc9dd-abogki428889875-4k'
   CCACHE_KEY: ccache-ecsv4-6.6.118
-  # Temporary one-off validation defaults; removed after this branch build completes.
-  AUTO_KSU_TYPE: 'sukisu'
-  AUTO_SUSFS_ENABLE: 'true'
-  AUTO_KPM_ENABLE: 'true'
-  AUTO_LZ4_ENABLE: 'true'
-  AUTO_LZ4KD_ENABLE: 'true'
-  AUTO_BBR_ENABLE: 'default'
-  AUTO_DROIDSPACES_ENABLE: 'extend'
-  AUTO_BETTER_NET: 'true'
-  AUTO_ADIOS_ENABLE: 'true'
-  AUTO_REKERNEL_ENABLE: 'true'
-  AUTO_BASEBAND_GUARD: 'true'
-  AUTO_CCACHE_UPDATE: 'false'
-  AUTO_CCACHE_DEBUG: 'false'
-  AUTO_KERNEL_SUFFIX: ''
 
 on:
-  push:
-    branches:
-      - hardening/6.6.118-config-verification
   workflow_dispatch:
     inputs:
       ksu_type:
@@ -195,7 +177,7 @@ jobs:
           echo "当前磁盘空间："
           df -h
           echo "当前构建内核版本：${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}"
-          if [[ "${{ github.event_name == 'push' && env.AUTO_DROIDSPACES_ENABLE || github.event.inputs.droidspaces_enable }}" != "false" ]]; then
+          if [[ "${{ github.event.inputs.droidspaces_enable }}" != "false" ]]; then
             CCACHE_REAL_KEY=${{ env.CCACHE_KEY }}-Droidspaces
           else
             CCACHE_REAL_KEY=${{ env.CCACHE_KEY }}-none
@@ -224,7 +206,7 @@ jobs:
           
           echo "未命中缓存，尝试拉取最新公共 ccache ..."
           mkdir -p ${{ env.CCACHE_DIR }}
-          if [[ "${{ github.event_name == 'push' && env.AUTO_DROIDSPACES_ENABLE || github.event.inputs.droidspaces_enable }}" != "false" ]]; then
+          if [[ "${{ github.event.inputs.droidspaces_enable }}" != "false" ]]; then
             FILE_NAME="ccache-${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-Droidspaces.tar.zst"
           else
             FILE_NAME="ccache-${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}.tar.zst"
@@ -239,7 +221,7 @@ jobs:
           fi
 
       - name: 清除旧 ccache 缓存
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_CCACHE_UPDATE) || inputs.ccache_update)
+        if: (inputs.ccache_update)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -276,9 +258,9 @@ jobs:
         id: ksu_version
         run: |
           cd kernel_workspace
-          if [[ "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "正在配置 SukiSU Ultra 官方最新提交..."
-            if [[ "${{ github.event_name == 'push' && env.AUTO_SUSFS_ENABLE || github.event.inputs.susfs_enable }}" == "true" ]]; then
+            if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
               # 官方 builtin 分支携带 SUSFS Kconfig；ARM64 通过官方 branch-link hook 避免手工逐个插桩。
               SUKISU_BRANCH="builtin"
             else
@@ -320,7 +302,7 @@ jobs:
             echo "sukisu_commit=$SUKISU_COMMIT" >> "$GITHUB_OUTPUT"
             echo "SukiSU commit: $SUKISU_COMMIT ($SUKISU_COMMIT_SHORT)"
             cd ..
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "resukisu" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
             echo "正在配置ReSukiSU/BakaSU（锁定 v4.2.0-rc3，main 分支含 SUSFS 门禁 error 指令）..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s v4.2.0-rc3
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
@@ -329,7 +311,7 @@ jobs:
             KSU_VERSION=35171
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "ksunext" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
             echo "正在配置KernelSU Next..."
             curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
             cd KernelSU-Next
@@ -343,7 +325,7 @@ jobs:
             cd ../common/drivers/kernelsu
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apk_sign.patch
             patch -p2 -N -F 3 < apk_sign.patch || true
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "ksu" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
             cd ./KernelSU
@@ -381,7 +363,7 @@ jobs:
             --exclude-dir=.git 2>/dev/null | head -n 100 || true
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) != 'none' }}
+        if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         run: |
           cd kernel_workspace
           echo "正在添加susfs补丁..."
@@ -394,18 +376,18 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
           patch -p1 -N -F 3 < 69_hide_stuff.patch || true
           cd ..
-          if [[ "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "ksu" ]]; then
+          if [[ "${{ github.event.inputs.ksu_type }}" == "ksu" ]]; then
             cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
             cd ./KernelSU
             patch -p1 < 10_enable_susfs_for_ksu.patch || true
-          elif [[ "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "resukisu" ]]; then
+          elif [[ "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
             echo "ReSukiSU 已原生集成 SUSFS，跳过 KernelSU bridge 补丁。"
-          elif [[ "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+          elif [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "SukiSU builtin 自带 SUSFS Kconfig；已应用内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
           fi
           
       - name: 兼容 SukiSU SUSFS_INLINE 的可选 preinit 接口
-        if: ${{ (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'sukisu' && (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) }}
+        if: ${{ (github.event.inputs.ksu_type) == 'sukisu' && (inputs.susfs_enable) }}
         working-directory: kernel_workspace
         shell: bash
         run: |
@@ -435,7 +417,7 @@ jobs:
           PYPREINIT
 
       - name: 为 SukiSU builtin 接入 ARM64 手动 Hooks
-        if: ${{ (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'sukisu' && (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) }}
+        if: ${{ (github.event.inputs.ksu_type) == 'sukisu' && (inputs.susfs_enable) }}
         working-directory: kernel_workspace
         shell: bash
         run: |
@@ -530,7 +512,7 @@ jobs:
           PYHOOK
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_LZ4_ENABLE) || inputs.lz4_enable)
+        if: (inputs.lz4_enable)
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
           cd kernel_workspace
@@ -552,7 +534,7 @@ jobs:
           echo "✅ lz4 1.10.0 + zstd 1.5.7 补丁已全部生效"
 
       - name: 应用 lz4kd 补丁
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_LZ4KD_ENABLE) || inputs.lz4kd_enable)
+        if: (inputs.lz4kd_enable)
         run: |
           echo "正在添加lz4kd补丁…"
           cd kernel_workspace
@@ -567,7 +549,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) != 'none' }}
+        if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -586,14 +568,14 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           
-          if [[ "${{ github.event_name == 'push' && env.AUTO_SUSFS_ENABLE || github.event.inputs.susfs_enable }}" == "false" ]]; then
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
 
           # SukiSU Ultra 官方集成文档要求通过 CONFIG_KPM=y 启用 KPM。
           # 不在源码目录中无参数运行 patch_linux；该方式无法证明补丁已生效。
-          if [[ "${{ github.event_name == 'push' && env.AUTO_KPM_ENABLE || github.event.inputs.kpm_enable }}" == "true" ]]; then
-            if [[ "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "sukisu" || "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "resukisu" ]]; then
+          if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
+            if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" || "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
               echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
               echo "CONFIG_KALLSYMS=y" >> ./common/arch/arm64/configs/gki_defconfig
               echo "CONFIG_KALLSYMS_ALL=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -605,7 +587,7 @@ jobs:
 
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          if [[ "${{ github.event_name == 'push' && env.AUTO_LZ4KD_ENABLE || github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             echo "CONFIG_ZSMALLOC=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -621,7 +603,7 @@ jobs:
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.6.patch
           
       - name: 启用网络功能增强优化配置
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_BETTER_NET) || inputs.better_net)
+        if: (inputs.better_net)
         run: |
           cd kernel_workspace
           echo "CONFIG_BPF_STREAM_PARSER=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -653,7 +635,7 @@ jobs:
 
       - name: 添加 BBR 等一系列拥塞控制算法
         run: |
-          if [[ "${{ github.event_name == 'push' && env.AUTO_BBR_ENABLE || github.event.inputs.bbr_enable }}" != "false" ]]; then
+          if [[ "${{ github.event.inputs.bbr_enable }}" != "false" ]]; then
             echo "正在添加BBR等拥塞控制算法..."
             cd kernel_workspace
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -664,7 +646,7 @@ jobs:
             echo "CONFIG_TCP_CONG_WESTWOOD=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_HTCP=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_TCP_CONG_BRUTAL=y" >> ./common/arch/arm64/configs/gki_defconfig
-            if [[ "${{ github.event_name == 'push' && env.AUTO_BBR_ENABLE || github.event.inputs.bbr_enable }}" == "default" ]]; then
+            if [[ "${{ github.event.inputs.bbr_enable }}" == "default" ]]; then
               echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
             else
               echo "CONFIG_DEFAULT_TCP_CONG=cubic" >> ./common/arch/arm64/configs/gki_defconfig
@@ -673,7 +655,7 @@ jobs:
 
       - name: 启用 Droidspaces 容器支持
         run: |
-          if [[ "${{ github.event_name == 'push' && env.AUTO_DROIDSPACES_ENABLE || github.event.inputs.droidspaces_enable }}" != "false" ]]; then
+          if [[ "${{ github.event.inputs.droidspaces_enable }}" != "false" ]]; then
             echo "正在启用 Droidspaces 容器支持..."
             cd kernel_workspace/common
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_sysvipc_kabi_6_7_8.patch
@@ -698,7 +680,7 @@ jobs:
             echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NTSYNC=y" >> ./arch/arm64/configs/gki_defconfig
-            if [[ "${{ github.event_name == 'push' && env.AUTO_DROIDSPACES_ENABLE || github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
+            if [[ "${{ github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
               echo "正在启用容器环境扩展支持..."
               echo "CONFIG_BT_HCIVHCI=y" >> ./arch/arm64/configs/gki_defconfig
               echo "CONFIG_STATIC_USERMODEHELPER=n" >> ./arch/arm64/configs/gki_defconfig
@@ -716,7 +698,7 @@ jobs:
           echo "CONFIG_SECURITY_LANDLOCK=y" >> ./common/arch/arm64/configs/gki_defconfig
 
       - name: 启用ADIOS IO调度器
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_ADIOS_ENABLE) || inputs.adios_enable)
+        if: (inputs.adios_enable)
         run: |
           echo "正在启用ADIOS IO调度器…"
           cd kernel_workspace
@@ -724,14 +706,14 @@ jobs:
           echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
 
       - name: 启用Re-Kernel支持
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_REKERNEL_ENABLE) || inputs.rekernel_enable)
+        if: (inputs.rekernel_enable)
         run: |
           echo "正在启用Re-Kernel支持…"
           cd kernel_workspace
           echo "CONFIG_REKERNEL=y" >> ./common/arch/arm64/configs/gki_defconfig
 
       - name: 启用内核级基带保护
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_BASEBAND_GUARD) || inputs.baseband_guard)
+        if: (inputs.baseband_guard)
         run: |
           echo "正在启用启用内核级基带保护支持…"
           cd kernel_workspace
@@ -744,12 +726,12 @@ jobs:
         run: |
           cd kernel_workspace
           echo "替换内核版本后缀..."
-          if [[ -n "${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}" ]]; then
-            echo "当前内核版本后缀：${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}"
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            echo "当前内核版本后缀：${{ github.event.inputs.kernel_suffix }}"
             for f in ./common/scripts/setlocalversion; do
-              sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}\"|" "$f"
+              sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" "$f"
             done
-            sudo sed -i 's/-4k/-${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.KERNEL_SUFFIX }}/g' ./common/arch/arm64/configs/gki_defconfig
+            sudo sed -i 's/-4k/-${{ github.event.inputs.KERNEL_SUFFIX }}/g' ./common/arch/arm64/configs/gki_defconfig
           else
             echo "当前内核版本后缀：${{ env.KERNEL_NAME }}"
             for f in ./common/scripts/setlocalversion; do
@@ -827,7 +809,7 @@ jobs:
           echo "Landlock 配置校验通过"
 
           # SUSFS 配置前置门禁：在耗时的 Image 编译前确认 Kconfig 确实识别了所有选项。
-          if [[ "${{ github.event_name == 'push' && env.AUTO_SUSFS_ENABLE || github.event.inputs.susfs_enable }}" == "true" && "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" != "none" ]]; then
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
             for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
               if ! grep -q "^${sym}=y$" out/.config; then
                 echo "::error::gki_defconfig 后 ${sym}=y 未生效；停止编译以避免生成不含完整 SUSFS 的内核"
@@ -847,7 +829,7 @@ jobs:
           df -h
 
       - name: 硬性验证 SUSFS 关键 CONFIG 已编入最终 .config
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) != 'none' }}
+        if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -874,7 +856,7 @@ jobs:
           echo "✅ SUSFS 验证通过"
 
       - name: 硬性验证 KPM CONFIG 已编入最终 .config
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_KPM_ENABLE) || inputs.kpm_enable) && ((github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'sukisu' || (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'resukisu') }}
+        if: ${{ (inputs.kpm_enable) && ((github.event.inputs.ksu_type) == 'sukisu' || (github.event.inputs.ksu_type) == 'resukisu') }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -890,7 +872,7 @@ jobs:
           echo "✅ KPM 配置验证通过"
 
       - name: 保存新的 ccache 缓存
-        if: (github.event_name == 'push' && fromJSON(env.AUTO_CCACHE_UPDATE) || inputs.ccache_update) || steps.ccache-restore.outputs.cache-hit != 'true'
+        if: (inputs.ccache_update) || steps.ccache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -908,31 +890,31 @@ jobs:
             echo "未找到内核镜像文件，构建可能出错"
             exit 1
           fi
-          if [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "sukisu" ]]; then
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
             KSU_TYPENAME="SukiSU"
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "resukisu" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
             KSU_TYPENAME="ReSukiSU"
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "ksunext" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
             KSU_TYPENAME="KSUNext"
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "ksu" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             KSU_TYPENAME="KSU"
           else
             KSU_TYPENAME="none"
           fi
-          if [[ "${{ github.event_name == 'push' && env.AUTO_LZ4KD_ENABLE || github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
           fi
           # 不再下载 KPN zip，因为已经源码级集成
-          if [[ -n "${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}" ]]; then
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}.zip
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
           else
             AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ env.KERNEL_NAME }}.zip
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
           
-          if [[ -n "${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}" ]]; then
-            FULL_VERSION=${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            FULL_VERSION=${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.event.inputs.kernel_suffix }}
           else
             FULL_VERSION=${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ env.KERNEL_NAME }}
           fi
@@ -946,24 +928,24 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
-          if [[ "${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }}" == "sukisu" ]]; then
+          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "SukiSU Branch: ${SUKISU_BRANCH}" >> ./ak3.log
             echo "SukiSU Commit: ${SUKISU_COMMIT}" >> ./ak3.log
           fi
-          echo "susfs: ${{ github.event_name == 'push' && env.AUTO_SUSFS_ENABLE || github.event.inputs.susfs_enable }}" >> ./ak3.log
-          echo "KPM: ${{ github.event_name == 'push' && env.AUTO_KPM_ENABLE || github.event.inputs.kpm_enable }}" >> ./ak3.log
-          echo "LZ4: ${{ github.event_name == 'push' && env.AUTO_LZ4_ENABLE || github.event.inputs.lz4_enable }}" >> ./ak3.log
-          echo "LZ4KD: ${{ github.event_name == 'push' && env.AUTO_LZ4KD_ENABLE || github.event.inputs.lz4kd_enable }}" >> ./ak3.log
-          echo "IPset: ${{ github.event_name == 'push' && env.AUTO_BETTER_NET || github.event.inputs.better_net }}" >> ./ak3.log
-          echo "BBR&Brutal: ${{ github.event_name == 'push' && env.AUTO_BBR_ENABLE || github.event.inputs.bbr_enable }}" >> ./ak3.log
-          echo "Droidspaces: ${{ github.event_name == 'push' && env.AUTO_DROIDSPACES_ENABLE || github.event.inputs.droidspaces_enable }}" >> ./ak3.log
-          echo "ADIOS: ${{ github.event_name == 'push' && env.AUTO_ADIOS_ENABLE || github.event.inputs.adios_enable }}" >> ./ak3.log
-          echo "Re-Kernel: ${{ github.event_name == 'push' && env.AUTO_REKERNEL_ENABLE || github.event.inputs.rekernel_enable }}" >> ./ak3.log
-          echo "BBG: ${{ github.event_name == 'push' && env.AUTO_BASEBAND_GUARD || github.event.inputs.baseband_guard }}" >> ./ak3.log
+          echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
+          echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
+          echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
+          echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
+          echo "BBR&Brutal: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
+          echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
+          echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
+          echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
+          echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
-        if: always() && (github.event_name == 'push' && fromJSON(env.AUTO_CCACHE_DEBUG) || inputs.ccache_debug)
+        if: always() && (inputs.ccache_debug)
         uses: actions/upload-artifact@v7
         with:
           name: ccache-debug-log
@@ -978,7 +960,6 @@ jobs:
           archive: false
 
   release:
-    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -996,8 +977,8 @@ jobs:
 
       - name: 设置环境变量
         run: |
-          if [[ -n "${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}" ]]; then
-            FULL_VERSION=${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.event_name == 'push' && env.AUTO_KERNEL_SUFFIX || github.event.inputs.kernel_suffix }}
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            FULL_VERSION=${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.event.inputs.kernel_suffix }}
             echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
             export FULL_VERSION=$FULL_VERSION
           else
@@ -1011,13 +992,13 @@ jobs:
           echo "TIME_FORM=$TIME_FORM" >> $GITHUB_ENV
           TAG_HEAD="OPPO-OPlus-Realme-build"
           echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
-          if [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "sukisu" ]]; then
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
             KSU_TYPENAME="SukiSU Ultra"
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "resukisu" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
             KSU_TYPENAME="ReSukiSU"
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "ksunext" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
             KSU_TYPENAME="KernelSU Next"
-          elif [[ ${{ github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type }} == "ksu" ]]; then
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             KSU_TYPENAME="KSU"
           else
             KSU_TYPENAME="无内置KSU"
@@ -1035,16 +1016,16 @@ jobs:
           - 编译时间: ${{ env.TIME_FORM }}
           - 机型：欧加真骁龙8Elite通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于一加13国际版 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方OKI源码）
           - KSU分支：${{ env.KSU_TYPENAME }}
-          - susfs支持：${{ github.event_name == 'push' && env.AUTO_SUSFS_ENABLE || github.event.inputs.susfs_enable }}
-          - KPM支持 ：${{ github.event_name == 'push' && env.AUTO_KPM_ENABLE || github.event.inputs.kpm_enable }}
-          - LZ4支持：${{ github.event_name == 'push' && env.AUTO_LZ4_ENABLE || github.event.inputs.lz4_enable }}
-          - LZ4KD支持：${{ github.event_name == 'push' && env.AUTO_LZ4KD_ENABLE || github.event.inputs.lz4kd_enable }}
-          - 网络功能增强：${{ github.event_name == 'push' && env.AUTO_BETTER_NET || github.event.inputs.better_net }}
-          - BBR/Brutal 等拥塞控制算法支持：${{ github.event_name == 'push' && env.AUTO_BBR_ENABLE || github.event.inputs.bbr_enable }}
-          - Droidspaces 容器支持：${{ github.event_name == 'push' && env.AUTO_DROIDSPACES_ENABLE || github.event.inputs.droidspaces_enable }}
-          - ADIOS IO调度器支持：${{ github.event_name == 'push' && env.AUTO_ADIOS_ENABLE || github.event.inputs.adios_enable }}
-          - Re-Kernel支持：${{ github.event_name == 'push' && env.AUTO_REKERNEL_ENABLE || github.event.inputs.rekernel_enable }}
-          - 内核级基带保护支持：${{ github.event_name == 'push' && env.AUTO_BASEBAND_GUARD || github.event.inputs.baseband_guard }}
+          - susfs支持：${{ github.event.inputs.susfs_enable }}
+          - KPM支持 ：${{ github.event.inputs.kpm_enable }}
+          - LZ4支持：${{ github.event.inputs.lz4_enable }}
+          - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
+          - 网络功能增强：${{ github.event.inputs.better_net }}
+          - BBR/Brutal 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
+          - Droidspaces 容器支持：${{ github.event.inputs.droidspaces_enable }}
+          - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
+          - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
+          - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
