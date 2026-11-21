@@ -444,105 +444,6 @@ jobs:
               "reboot hook")
           PYHOOK
 
-      - name: 补齐 SUSFS 与 SukiSU builtin 的 preinit 兼容接口
-        if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
-        working-directory: kernel_workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PYSUSFS'
-          from pathlib import Path
-          import re
-
-          ksu_dir = Path("KernelSU/kernel")
-          makefile = ksu_dir / "Makefile"
-          if not ksu_dir.is_dir() or not makefile.is_file():
-              raise SystemExit("::error::未找到 SukiSU kernel 源码目录或 Makefile")
-
-          symbols = {
-              "ksu_setup_preinit_file": """int ksu_setup_preinit_file(struct filename **filename_ptr, struct user_arg_ptr *argv_user)
-          {
-              (void)filename_ptr;
-              (void)argv_user;
-              return -EINVAL;
-          }""",
-              "ksu_preinit_handle_post_execveat": """int ksu_preinit_handle_post_execveat(int *fd, struct filename **filename_ptr,
-                  void *argv_user, void *envp_user, int *flags, int *retval, int *preinit_fd)
-          {
-              (void)fd;
-              (void)filename_ptr;
-              (void)argv_user;
-              (void)envp_user;
-              (void)flags;
-              (void)retval;
-              (void)preinit_fd;
-              return 0;
-          }""",
-          }
-
-          def global_definitions(symbol):
-              pattern = re.compile(
-                  rf"(?m)^\s*(?!static\b)(?:__weak\s+)?int\s+{re.escape(symbol)}\s*\([^;{{}}]*\)\s*\{{"
-              )
-              found = []
-              for path in ksu_dir.rglob("*"):
-                  if path.suffix not in {".c", ".h"} or not path.is_file():
-                      continue
-                  source = path.read_text(errors="replace")
-                  for match in pattern.finditer(source):
-                      found.append((path, source.count("\n", 0, match.start()) + 1))
-              return found
-
-          missing = []
-          for symbol in symbols:
-              defs = global_definitions(symbol)
-              if len(defs) > 1:
-                  raise SystemExit(f"::error::{symbol} 存在多个全局定义：{defs}")
-              if not defs:
-                  missing.append(symbol)
-              else:
-                  print(f"✓ {symbol}: 已有全局定义 {defs[0][0]}:{defs[0][1]}")
-
-          if missing:
-              # SukiSU Makefile reports this exact condition when preinit is disabled.
-              if Path("common/usr/include").is_dir():
-                  raise SystemExit(
-                      "::error::preinit 目录缺失但 common/usr/include 存在；"
-                      "不能在 preinit 应启用时自动添加空实现"
-                  )
-
-              compat = ksu_dir / "susfs_preinit_compat.c"
-              if compat.exists():
-                  raise SystemExit("::error::兼容文件已存在，但缺少接口仍未解决，拒绝覆盖")
-              chunks = [
-                  "/* SUSFS compatibility: SukiSU builtin has preinit disabled. */",
-                  "#include <linux/errno.h>",
-                  "struct filename;",
-                  "struct user_arg_ptr;",
-                  "",
-              ]
-              chunks.extend(symbols[s] for s in missing)
-              compat.write_text("\n\n".join(chunks) + "\n")
-              line = "obj-y += susfs_preinit_compat.o"
-              mk = makefile.read_text()
-              if line not in mk.splitlines():
-                  makefile.write_text(mk.rstrip() + "\n" + line + "\n")
-              print("✓ 已为 preinit-disabled 构建补齐兼容接口：" + ", ".join(missing))
-          else:
-              print("✓ 两个 SUSFS preinit 接口均已有实现，不添加兼容文件")
-
-          # Final hard verification: exactly one global definition for each symbol,
-          # and the compatibility object is wired into Kbuild when it was needed.
-          for symbol in symbols:
-              defs = global_definitions(symbol)
-              if len(defs) != 1:
-                  raise SystemExit(f"::error::{symbol} 最终全局定义数为 {len(defs)}，要求恰好 1")
-          if (ksu_dir / "susfs_preinit_compat.c").exists():
-              if "obj-y += susfs_preinit_compat.o" not in makefile.read_text().splitlines():
-                  raise SystemExit("::error::susfs_preinit_compat.o 未加入 SukiSU Kbuild")
-          print("✓ SUSFS preinit 符号与 Kbuild 验证通过")
-          PYSUSFS
-
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
@@ -919,7 +820,46 @@ jobs:
           print("✓ 已将 libbpf.c 的 next_path 修正为 const char *")
           PYBPF
 
+          # SukiSU Nova builtin 只有在 objtree/usr/include/linux/unistd.h 存在时才会编译 preinit。
+          # 先为 O=out 安装本内核 UAPI headers，避免只在源码中有 preinit 定义、却未参与链接。
+          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" && "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+            echo "===== 准备 SukiSU builtin preinit 所需 UAPI headers ====="
+            make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out INSTALL_HDR_PATH="$(pwd)/out/usr" headers_install
+            if [[ ! -s out/usr/include/linux/unistd.h ]]; then
+              echo "::error::headers_install 未生成 out/usr/include/linux/unistd.h，SukiSU preinit 无法启用"
+              exit 1
+            fi
+            if ! grep -Fq 'ksu-y += preinit/preinit.o preinit/blob.o' KernelSU/kernel/Makefile; then
+              echo "::error::当前 SukiSU Makefile 不包含 preinit 对象，拒绝继续"
+              exit 1
+            fi
+            if [[ ! -s KernelSU/kernel/preinit/runner/runner.c ]]; then
+              echo "::error::SukiSU preinit runner 源文件缺失"
+              exit 1
+            fi
+            echo "✓ UAPI headers 与 SukiSU preinit 构建条件均已满足"
+          fi
+
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+
+          if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" && "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+            echo "===== 硬性验证 SukiSU preinit 已实际编译并链接 ====="
+            for obj in out/drivers/kernelsu/preinit/preinit.o out/drivers/kernelsu/preinit/blob.o; do
+              if [[ ! -s "$obj" ]]; then
+                echo "::error::SukiSU preinit 对象未生成：$obj"
+                exit 1
+              fi
+              echo "✓ $obj"
+            done
+            for sym in ksu_setup_preinit_file ksu_preinit_handle_post_execveat; do
+              count=$("$CLANG_DIR/llvm-nm" -g --defined-only out/vmlinux | awk -v s="$sym" '$NF == s {n++} END {print n+0}')
+              if [[ "$count" != "1" ]]; then
+                echo "::error::$sym 在最终 vmlinux 中的全局定义数为 $count，要求恰好 1"
+                exit 1
+              fi
+              echo "✓ $sym 已唯一链接进 vmlinux"
+            done
+          fi
           
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
           LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
