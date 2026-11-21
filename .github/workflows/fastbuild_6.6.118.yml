@@ -386,6 +386,36 @@ jobs:
             echo "SukiSU builtin 自带 SUSFS Kconfig；已应用内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
           fi
           
+      - name: 兼容 SukiSU SUSFS_INLINE 的可选 preinit 接口
+        if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
+        working-directory: kernel_workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYPREINIT'
+          from pathlib import Path
+
+          path = Path("common/fs/exec.c")
+          source = path.read_text()
+          anchor = "#ifdef CONFIG_KSU_SUSFS\\nextern struct static_key_true ksu_su_compat_enabled;"
+          if source.count(anchor) != 1:
+              raise SystemExit("::error::SUSFS exec.c preinit guard insertion point must match exactly once")
+          if "ksu_setup_preinit_file" not in source or "ksu_preinit_handle_post_execveat" not in source:
+              raise SystemExit("::error::SUSFS exec.c does not contain the expected optional preinit calls")
+          if "#define KSU_NO_PREINIT" in source:
+              raise SystemExit("::error::KSU_NO_PREINIT is already defined; refusing duplicate modification")
+
+          source = source.replace(
+              anchor,
+              "#define KSU_NO_PREINIT 1\\n" + anchor,
+              1,
+          )
+          if source.count("#define KSU_NO_PREINIT 1") != 1:
+              raise SystemExit("::error::KSU_NO_PREINIT insertion verification failed")
+          path.write_text(source)
+          print("✓ SukiSU SUSFS_INLINE: disabled only the optional KernelSU preinit path guarded by KSU_NO_PREINIT")
+          PYPREINIT
+
       - name: 为 SukiSU builtin 接入 ARM64 手动 Hooks
         if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
         working-directory: kernel_workspace
