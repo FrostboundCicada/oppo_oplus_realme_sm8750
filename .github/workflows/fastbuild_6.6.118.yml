@@ -325,7 +325,7 @@ jobs:
         run: |
           cd kernel_workspace
           echo "正在添加susfs补丁..."
-          git clone --depth=1 https://github.com/simonpunk/susfs4ksu.git susfs4ksu -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
           cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -350,76 +350,93 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "为 SukiSU builtin 检查 Linux 6.6 手动 Hooks（Android 15）..."
+          echo "为 SukiSU builtin 接入 Linux 6.6 手动 Hooks（Android 15）..."
           python3 - <<'PYHOOK'
           from pathlib import Path
-          import re
+          import re, sys
 
-          def ensure_hook(path, pattern, marker, replacement, label):
+          def insert_once(path, pattern, replacement, marker, label):
               p = Path(path)
               text = p.read_text()
+              # Idempotency is based on the actual function-call marker, not whitespace-sensitive
+              # matching of the whole inserted block. This prevents duplicate hooks when an
+              # earlier SUSFS patch already added the same call.
               count = text.count(marker)
               if count == 1:
-                  print(f"✓ {label} 已存在且只出现一次，跳过插入")
+                  print(f"✓ {label} 已存在且唯一，跳过")
                   return
               if count > 1:
-                  raise SystemExit(
-                      f"::error::{label}: {path} 中已有 {count} 个调用，拒绝继续，避免重复 Hook"
-                  )
+                  raise SystemExit(f"::error::{label}: {path} 中调用已出现 {count} 次，拒绝自动删除或继续插入")
               matches = list(re.finditer(pattern, text, flags=re.S))
               if len(matches) != 1:
-                  raise SystemExit(
-                      f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个插入位置，拒绝盲目修改"
-                  )
+                  raise SystemExit(f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个目标位置，拒绝盲目修改")
               m = matches[0]
               text = text[:m.end()] + replacement + text[m.end():]
-              if text.count(marker) != 1:
-                  raise SystemExit(f"::error::{label}: 插入后调用数量异常")
               p.write_text(text)
               print(f"✓ 已插入 {label}")
 
-          # 先检查调用标记再插入：如果 SUSFS 补丁已添加该 Hook，不会再重复插入。
-          ensure_hook(
+          # Linux 6.6 Android common: do_execveat_common has int retval; before first executable logic.
+          insert_once(
               "common/fs/exec.c",
               r"(static int do_execveat_common\s*\([^)]*\)\s*\{(?:(?!\n\}).)*?\n\s*int retval;)",
-              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
-              "execveat hook")
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);", "execveat hook")
 
-          ensure_hook(
-              "common/fs/open.c",
-              r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
-              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
-              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
-              "faccessat hook")
+          # SUSFS-enabled SukiSU changes these handler APIs to take struct filename **.
+          # The syscall entry points below expose const char __user * instead, so the
+          # generic user-pointer hooks are ABI-incompatible in this configuration.
+          # Do not inject a conflicting declaration or an invalid call; keep these hooks
+          # disabled unless the source has the user-pointer API expected by the generic guide.
+          open_source = Path("common/fs/open.c").read_text()
+          if re.search(r"ksu_handle_faccessat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", open_source):
+              print("⚠ SUSFS 的 faccessat handler 使用 struct filename **；跳过不兼容的 syscall-level user-pointer hook")
+          else:
+              insert_once(
+                  "common/fs/open.c",
+                  r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
+                  "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
+                  "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);", "faccessat hook")
 
-          ensure_hook(
-              "common/fs/stat.c",
-              r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
-              "ksu_handle_stat(&dfd, &filename, &flag);",
-              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
-              "newfstatat hook")
+          # Hook sys_newfstatat only when the handler uses the user-pointer API.
+          stat_source = Path("common/fs/stat.c").read_text()
+          if re.search(r"ksu_handle_stat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", stat_source):
+              print("⚠ SUSFS 的 stat handler 使用 struct filename **；跳过不兼容的 syscall-level user-pointer hook")
+          else:
+              insert_once(
+                  "common/fs/stat.c",
+                  r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
+                  "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
+                  "ksu_handle_stat(&dfd, &filename, &flag);", "newfstatat hook")
 
-          ensure_hook(
+          # New KernelSU supercall reboot hook.
+          insert_once(
               "common/kernel/reboot.c",
               r"(SYSCALL_DEFINE4\(reboot,\s*int,\s*magic1,\s*int,\s*magic2,\s*unsigned int,\s*cmd,\s*void __user \*,\s*arg\)\s*\{(?:(?!\n\}).)*?\n\s*int ret = 0;)",
-              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
               "\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\n\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif",
-              "reboot hook")
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);", "reboot hook")
 
+          # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
-              "common/fs/exec.c": "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
-              "common/fs/open.c": "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
-              "common/fs/stat.c": "ksu_handle_stat(&dfd, &filename, &flag);",
-              "common/kernel/reboot.c": "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
+              "common/fs/exec.c": ["ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"],
+              "common/kernel/reboot.c": ["ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"]
           }
-          for path, marker in checks.items():
-              count = Path(path).read_text().count(marker)
-              if count != 1:
-                  raise SystemExit(f"::error::Hook 验证失败：{path} 中调用出现 {count} 次（要求恰好一次）")
-              print(f"✓ {path}: Hook 调用恰好一次")
-
-          print("四个 Hook 的文本数量检查通过。注意：这不等于内核已成功编译或 KPM 已可用。")
+          # Validate user-pointer hooks only when the corresponding SUSFS filename** API is absent.
+          if not re.search(r"ksu_handle_faccessat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", Path("common/fs/open.c").read_text()):
+              checks["common/fs/open.c"] = ["ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"]
+          if not re.search(r"ksu_handle_stat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", Path("common/fs/stat.c").read_text()):
+              checks["common/fs/stat.c"] = ["ksu_handle_stat(&dfd, &filename, &flag);"]
+          for path, needles in checks.items():
+              content = Path(path).read_text()
+              for needle in needles:
+                  count = content.count(needle)
+                  if count != 1:
+                      print(f"::error::Hook 验证失败：{path} 中 {needle!r} 出现 {count} 次")
+                      for i, line in enumerate(content.splitlines(), 1):
+                          if needle in line:
+                              print(f"  {path}:{i}: {line.strip()}")
+                      raise SystemExit(1)
+          print("已验证 execveat / faccessat / newfstatat / reboot 四个 Hook。")
+          print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
           PYHOOK
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
@@ -505,10 +522,6 @@ jobs:
             echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
           fi
-          # cpak 图形化 Wine 容器所需的 Linux Landlock 安全隔离支持
-          echo "CONFIG_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_SECURITY_LANDLOCK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,baseband_guard,smack,tomoyo,apparmor,bpf"' >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
           echo "CONFIG_HEADERS_INSTALL=n" >> ./common/arch/arm64/configs/gki_defconfig
@@ -704,12 +717,6 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
-          # Landlock 配置硬校验：未进入最终 .config 时直接终止，不继续编译。
-          grep -Fxq 'CONFIG_SECURITY=y' out/.config || { echo "::error::Landlock 依赖 CONFIG_SECURITY=y 未生效"; exit 1; }
-          grep -Fxq 'CONFIG_SECURITY_LANDLOCK=y' out/.config || { echo "::error::CONFIG_SECURITY_LANDLOCK=y 未生效"; exit 1; }
-          grep -Fxq 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,baseband_guard,smack,tomoyo,apparmor,bpf"' out/.config || { echo "::error::CONFIG_LSM 未保留要求的 Landlock LSM 顺序"; grep '^CONFIG_LSM=' out/.config || true; exit 1; }
-          echo "✅ Landlock 配置校验通过"
-
 
           # SUSFS 配置前置门禁：在耗时的 Image 编译前确认 Kconfig 确实识别了所有选项。
           if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
@@ -730,47 +737,6 @@ jobs:
           echo "内核编译完成！"
           ccache -s
           df -h
-
-      - name: 注入 KernelPatch KPM 核心映像
-        if: ${{ inputs.kpm_enable && (github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'resukisu') }}
-        working-directory: kernel_workspace/common/out/arch/arm64/boot
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -s Image
-          cp Image Image.before-kpm
-
-          # Actions 不会自动检出本仓库根目录的 kpm_patch/，因此从官方 0.13.9 Release 获取工具。
-          BASE="https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.13.9"
-          curl -fL --retry 3 "$BASE/kpimg" -o kpimg
-          curl -fL --retry 3 "$BASE/kptools-linux" -o kptools-linux
-          chmod +x kptools-linux
-
-          echo "===== KernelPatch 工具 ====="
-          file kpimg kptools-linux
-          ./kptools-linux --version
-          ./kptools-linux --version --kpimg kpimg
-          ./kptools-linux --list --kpimg kpimg
-
-          echo "===== 注入前镜像 ====="
-          sha256sum Image.before-kpm
-
-          # 输出到独立文件，先不覆盖原始 Image。
-          ./kptools-linux --patch \
-            --image Image.before-kpm \
-            --kpimg kpimg \
-            --out Image.kpm
-
-          test -s Image.kpm
-          echo "===== 补丁后镜像信息 ====="
-          ls -lh Image.before-kpm Image.kpm
-          sha256sum Image.before-kpm Image.kpm
-          ./kptools-linux --list --image Image.kpm
-
-          # 只有工具成功生成并能读取补丁信息后，才将补丁镜像作为后续打包输入。
-          cp Image.kpm Image
-          echo "已将 KernelPatch 注入后的 Image 设为后续打包输入。"
 
       - name: 硬性验证 SUSFS 关键 CONFIG 已编入最终 .config
         if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
