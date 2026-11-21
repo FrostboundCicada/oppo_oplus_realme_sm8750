@@ -647,7 +647,6 @@ jobs:
         run: |
           echo "启用 Linux Landlock LSM 支持..."
           cd kernel_workspace
-          # 6.6.118 源码已包含 Landlock 实现，无需额外移植源码补丁；这里只启用内核配置。
           echo "CONFIG_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_SECURITY_LANDLOCK=y" >> ./common/arch/arm64/configs/gki_defconfig
 
@@ -750,17 +749,8 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
-          # Landlock 必须实际进入最终配置，且位于 LSM 初始化列表中。
-          if ! grep -q '^CONFIG_SECURITY_LANDLOCK=y' out/.config; then
-            echo "::error::CONFIG_SECURITY_LANDLOCK 未生效，停止编译"
-            exit 1
-          fi
-          if ! grep -q '^CONFIG_LSM="landlock,' out/.config; then
-            echo "::error::CONFIG_LSM 未将 landlock 放在 LSM 初始化列表首位，停止编译"
-            grep '^CONFIG_LSM=' out/.config || true
-            exit 1
-          fi
-          echo "Landlock 配置校验通过"
+          # Landlock 配置必须真实进入最终 .config，并在启动时启用。
+          if ! grep -q '^CONFIG_SECURITY_LANDLOCK=y
           # SUSFS 配置前置门禁：在耗时的 Image 编译前确认 Kconfig 确实识别了所有选项。
           if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
             for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
@@ -1005,11 +995,11 @@ jobs:
             --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \
             --notes-file release_notes.md \
             release_zips/AnyKernel3_*.zip out/.config; then
-            echo "::error::CONFIG_SECURITY_LANDLOCK=y 未生效，停止编译"
+            echo "::error::CONFIG_SECURITY_LANDLOCK 未生效，停止编译"
             exit 1
           fi
           if ! grep -q '^CONFIG_LSM="landlock,' out/.config; then
-            echo "::error::CONFIG_LSM 未将 landlock 放在 LSM 初始化列表首位，停止编译"
+            echo "::error::CONFIG_LSM 未将 landlock 放在首位，停止编译"
             grep '^CONFIG_LSM=' out/.config || true
             exit 1
           fi
