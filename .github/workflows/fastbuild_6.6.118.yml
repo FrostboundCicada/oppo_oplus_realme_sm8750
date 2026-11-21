@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认ReSukiSU)'
+        description: 'KernelSU分支(ReSukiSU/SukiSU-Nova/KernelSU Next/KSU(原版)/无内置KSU,默认ReSukiSU)'
         required: true
         type: choice
         default: 'resukisu'
@@ -23,12 +23,12 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启SUSFS（SukiSU Ultra 使用官方 builtin 分支并启用 ARM64 branch-link hook；其他分支沿用各自补丁流程）'
+        description: '是否开启SUSFS（SukiSU-Nova 使用官方 builtin 分支并启用 ARM64 branch-link hook；其他分支沿用各自补丁流程）'
         required: true
         type: boolean
         default: 'true'
       kpm_enable:
-        description: '是否开启 KPM（SukiSU Ultra 按官方集成方式启用 CONFIG_KPM；ReSukiSU 沿用现有流程）'
+        description: '是否开启 KPM（SukiSU-Nova 按官方集成方式启用 CONFIG_KPM；ReSukiSU 沿用现有流程）'
         required: true
         type: boolean
         default: 'false'
@@ -102,6 +102,7 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
       sukisu_commit: ${{ steps.ksu_version.outputs.sukisu_commit }}
+      susfs_commit: ${{ steps.susfs_version.outputs.susfs_commit }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
     permissions:
       actions: write
@@ -145,6 +146,23 @@ jobs:
           rm -rf build-tools.zip &
           
           wait
+          # 修正 Linux 6.6 libbpf 在当前 C23/glibc 环境下的 const 指针兼容性。
+          python3 - <<'PYLIBBPF'
+          from pathlib import Path
+          import re
+          p = Path("common/tools/lib/bpf/libbpf.c")
+          if not p.is_file():
+              raise SystemExit("::error::未找到 tools/lib/bpf/libbpf.c")
+          s = p.read_text()
+          pattern = r"(?m)^(\s*)char \*next_path;(?=\n\s*int seg_len;)"
+          s2, n = re.subn(pattern, r"\1const char *next_path;", s)
+          if n != 1:
+              raise SystemExit(f"::error::libbpf next_path 修正目标应恰好匹配 1 处，实际 {n} 处")
+          p.write_text(s2)
+          if not re.search(r"(?m)^\s*const char \*next_path;(?=\n\s*int seg_len;)", p.read_text()):
+              raise SystemExit("::error::libbpf const 指针修正复核失败")
+          print("✓ libbpf C23 const 指针兼容修正已应用并复核")
+          PYLIBBPF
           echo "所有源码及llvm-Clang18工具链初始化完成！"
           echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
           rm common/android/abi_gki_protected_exports_* || true
@@ -204,7 +222,7 @@ jobs:
           fi
 
       - name: 清除旧 ccache 缓存
-        if: inputs.ccache_update
+        if: (inputs.ccache_update)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -242,42 +260,93 @@ jobs:
         run: |
           cd kernel_workspace
           if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-            echo "正在配置 SukiSU Ultra 官方最新提交..."
+            set -euo pipefail
+            echo "正在配置 SukiSU-Nova 官方最新提交..."
             if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
-              # 官方 builtin 分支携带 SUSFS Kconfig；ARM64 通过官方 branch-link hook 避免手工逐个插桩。
+              # builtin 分支携带 SUSFS Kconfig；必须与官方 builtin 分支当前 HEAD 精确一致。
               SUKISU_BRANCH="builtin"
             else
               SUKISU_BRANCH="main"
             fi
-            echo "SukiSU 集成分支：$SUKISU_BRANCH"
-            curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- "$SUKISU_BRANCH"
+            SUKISU_REPO="https://github.com/SukiSU-Nova/SukiSU-Nova.git"
+            SUKISU_REMOTE_HEAD=$(git ls-remote "$SUKISU_REPO" "refs/heads/$SUKISU_BRANCH" | awk 'NR==1 {print $1}')
+            if [[ ! "$SUKISU_REMOTE_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::无法从 SukiSU-Nova 官方仓库解析 $SUKISU_BRANCH 最新提交"
+              exit 1
+            fi
+            echo "SukiSU-Nova 分支：$SUKISU_BRANCH"
+            echo "SukiSU-Nova 最新提交：$SUKISU_REMOTE_HEAD"
 
-            # 不允许 setup 脚本静默回退到其他分支；确认实际 checkout 和必要 Kconfig 均存在。
-            if [[ ! -d ./KernelSU/.git ]]; then
-              echo "::error::SukiSU setup 后未找到 ./KernelSU Git 仓库"
+            # 不调用上游 setup.sh：该脚本目前仍从旧的第三方 Git 镜像克隆，
+            # 镜像缺少官方最新 commit。直接从官方 GitHub 仓库检出目标分支。
+            if [[ -e ./KernelSU ]]; then
+              echo "::error::检测到残留 ./KernelSU 路径，拒绝覆盖未知源码"
               exit 1
             fi
-            ACTUAL_SUKISU_BRANCH=$(git -C ./KernelSU branch --show-current)
-            echo "实际 SukiSU 分支：${ACTUAL_SUKISU_BRANCH:-detached HEAD}"
-            if [[ "$ACTUAL_SUKISU_BRANCH" != "$SUKISU_BRANCH" ]]; then
-              echo "::error::SukiSU 分支不匹配：期望 $SUKISU_BRANCH，实际 ${ACTUAL_SUKISU_BRANCH:-detached HEAD}"
+            git clone --depth=1 --branch "$SUKISU_BRANCH" "$SUKISU_REPO" ./KernelSU
+            SUKISU_COMMIT=$(git -C ./KernelSU rev-parse HEAD)
+            if [[ "$SUKISU_COMMIT" != "$SUKISU_REMOTE_HEAD" ]]; then
+              echo "::error::SukiSU-Nova 官方分支在解析与克隆期间发生变化，或检出不一致：期望 $SUKISU_REMOTE_HEAD，实际 $SUKISU_COMMIT"
               exit 1
             fi
+
+            # 等价复现官方 setup.sh 的 GKI 驱动目录集成步骤。
+            if [[ ! -d ./common/drivers || ! -f ./common/drivers/Makefile || ! -f ./common/drivers/Kconfig ]]; then
+              echo "::error::GKI common/drivers 目录结构不完整，无法接入 SukiSU-Nova"
+              exit 1
+            fi
+            if [[ -e ./common/drivers/kernelsu || -L ./common/drivers/kernelsu ]]; then
+              echo "::error::common/drivers/kernelsu 已存在，拒绝覆盖"
+              exit 1
+            fi
+            ln -s "$(realpath --relative-to=./common/drivers ./KernelSU/kernel)" ./common/drivers/kernelsu
+            grep -q "kernelsu" ./common/drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> ./common/drivers/Makefile
+            grep -q 'source "drivers/kernelsu/Kconfig"' ./common/drivers/Kconfig || sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' ./common/drivers/Kconfig
+
             if [[ "$SUKISU_BRANCH" == "builtin" ]]; then
               if ! grep -RqsE '^[[:space:]]*config[[:space:]]+KSU_SUSFS([[:space:]]|$)' ./KernelSU/kernel; then
                 echo "::error::官方 builtin 源码中未找到 CONFIG_KSU_SUSFS 的 Kconfig 定义"
                 exit 1
               fi
             fi
-            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@SukiSU-Nova"' >> ./common/arch/arm64/configs/gki_defconfig
 
             cd ./KernelSU
-            SUKISU_COMMIT=$(git rev-parse HEAD)
             SUKISU_COMMIT_SHORT=$(git rev-parse --short=12 HEAD)
-            KSU_VERSION=$(grep -m1 '^KSU_VERSION' kernel/Kbuild | grep -oE '[0-9]+(-[a-zA-Z0-9]+)?' | head -n1 || true)
-            if [[ -z "$KSU_VERSION" ]]; then
-              KSU_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo "unknown")
+
+            # 与 SukiSU-Nova kernel/Makefile 保持同一版本计算方式：
+            # KSU_VERSION = VERSION_BASE + main 分支提交总数 - VERSION_OFFSET。
+            KSU_MAKEFILE=kernel/Makefile
+            if [[ ! -s "$KSU_MAKEFILE" ]]; then
+              echo "::error::SukiSU-Nova 缺少 kernel/Makefile，无法读取官方版本计算参数"
+              exit 1
             fi
+            read_make_var() {
+              sed -nE "s/^[[:space:]]*$1[[:space:]]*:?=[[:space:]]*([^[:space:]#]+).*$/\\1/p" "$KSU_MAKEFILE" | head -n1
+            }
+            KSU_VERSION_BASE=$(read_make_var VERSION_BASE)
+            KSU_VERSION_OFFSET=$(read_make_var VERSION_OFFSET)
+            KSU_VERSION_BRANCH=$(read_make_var REPO_BRANCH)
+            if [[ ! "$KSU_VERSION_BASE" =~ ^[0-9]+$ || ! "$KSU_VERSION_OFFSET" =~ ^[0-9]+$ || -z "$KSU_VERSION_BRANCH" ]]; then
+              echo "::error::无法从 SukiSU-Nova kernel/Makefile 解析 VERSION_BASE/VERSION_OFFSET/REPO_BRANCH"
+              exit 1
+            fi
+
+            KSU_COMMIT_COUNT=$(curl --fail --silent --show-error --location --retry 3 --retry-delay 2 --head \
+              "https://api.github.com/repos/SukiSU-Nova/SukiSU-Nova/commits?sha=$KSU_VERSION_BRANCH&per_page=1" \
+              | tr -d '\r' \
+              | sed -nE 's/.*[?&]page=([0-9]+)>;[[:space:]]*rel="last".*/\1/p' \
+              | tail -n1)
+            if [[ ! "$KSU_COMMIT_COUNT" =~ ^[0-9]+$ ]]; then
+              echo "::error::无法从 SukiSU-Nova 官方 API 获取 $KSU_VERSION_BRANCH 分支提交总数，拒绝生成错误版本号"
+              exit 1
+            fi
+            KSU_VERSION=$((KSU_VERSION_BASE + KSU_COMMIT_COUNT - KSU_VERSION_OFFSET))
+            if (( KSU_VERSION <= 0 )); then
+              echo "::error::计算得到的 SukiSU-Nova 版本号无效：$KSU_VERSION"
+              exit 1
+            fi
+            echo "SukiSU-Nova 官方版本计算：$KSU_VERSION_BASE + $KSU_COMMIT_COUNT - $KSU_VERSION_OFFSET = $KSU_VERSION"
             echo "SUKISU_COMMIT=$SUKISU_COMMIT" >> "$GITHUB_ENV"
             echo "SUKISU_BRANCH=$SUKISU_BRANCH" >> "$GITHUB_ENV"
             echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
@@ -319,111 +388,220 @@ jobs:
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
+            cd ./KernelSU
 
-      - name: 应用 KernelSU & SUSFS 补丁
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
+            echo "===== SukiSU commit ====="
+            git rev-parse HEAD
+
+            echo "===== KPM 相关源码位置 ====="
+            grep -RnsE 'sukisu_kpm_version|Stub function called' \
+            kernel --include='*.c' --include='*.h' || true
+
+            echo "===== KPM 配置定义 ====="
+            grep -RnsE 'config KPM|CONFIG_KPM' \
+            kernel --include='Kconfig*' --include='*.h' || true
+
+
+            echo "===== KPM stub implementation ====="
+            sed -n '1,150p' kernel/extension/kpm/kpm.c
+
+            echo "===== KPM implementation files ====="
+            find kernel/extension/kpm -maxdepth 3 -type f -print
+
+            echo "===== KPM patch repository references ====="
+            grep -RnsE 'KernelPatch|KPM.*patch|kpm.*patch' \
+            ../ --include='*.sh' --include='*.yml' \
+            --include='*.yaml' --include='*.patch' \
+            --exclude-dir=.git 2>/dev/null | head -n 100 || true
+
+      - name: 应用官方 SUSFS 补丁
+        id: susfs_version
+        if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         run: |
+          set -euo pipefail
           cd kernel_workspace
-          echo "正在添加susfs补丁..."
-          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          SUSFS_BRANCH="gki-${ANDROID_VERSION}-${KERNEL_VERSION}"
+          SUSFS_REMOTE_HEAD=$(git ls-remote "$SUSFS_REPO" "refs/heads/$SUSFS_BRANCH" | awk 'NR==1 {print $1}')
+          if [[ ! "$SUSFS_REMOTE_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::无法从官方 SUSFS 仓库解析分支 $SUSFS_BRANCH 的最新提交"
+            exit 1
+          fi
+          echo "官方 SUSFS 仓库：$SUSFS_REPO"
+          echo "官方 SUSFS 分支：$SUSFS_BRANCH"
+          echo "官方 SUSFS 最新提交：$SUSFS_REMOTE_HEAD"
+
+          git clone --depth=1 --branch "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu
+          SUSFS_COMMIT=$(git -C susfs4ksu rev-parse HEAD)
+          if [[ "$SUSFS_COMMIT" != "$SUSFS_REMOTE_HEAD" ]]; then
+            echo "::error::SUSFS checkout 与官方分支最新 HEAD 不一致：期望 $SUSFS_REMOTE_HEAD，实际 $SUSFS_COMMIT"
+            exit 1
+          fi
+          SUSFS_KERNEL_PATCH="./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
+          if [[ ! -s "$SUSFS_KERNEL_PATCH" ]]; then
+            echo "::error::官方 SUSFS 缺少目标内核补丁：$SUSFS_KERNEL_PATCH"
+            find ./susfs4ksu/kernel_patches -maxdepth 2 -type f -print
+            exit 1
+          fi
+          if [[ ! -d ./susfs4ksu/kernel_patches/fs || ! -d ./susfs4ksu/kernel_patches/include/linux ]]; then
+            echo "::error::官方 SUSFS 内核源码目录不完整"
+            exit 1
+          fi
+          cp -a ./susfs4ksu/kernel_patches/fs/. ./common/fs/
+          cp -a ./susfs4ksu/kernel_patches/include/linux/. ./common/include/linux/
+          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch" -O ./common/69_hide_stuff.patch
           cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-          patch -p1 -N -F 3 < 69_hide_stuff.patch || true
+          echo "===== 严格应用官方 SUSFS 内核补丁 ====="
+          patch --batch --forward -p1 < "../$SUSFS_KERNEL_PATCH"
+          echo "===== 应用仓库内既有 69_hide_stuff.patch ====="
+          patch --batch --forward -p1 -F 3 < 69_hide_stuff.patch
           cd ..
           if [[ "${{ github.event.inputs.ksu_type }}" == "ksu" ]]; then
-            cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+            KSU_BRIDGE_PATCH="./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+            if [[ ! -s "$KSU_BRIDGE_PATCH" ]]; then
+              echo "::error::官方 SUSFS 缺少 KernelSU bridge 补丁"
+              exit 1
+            fi
+            cp "$KSU_BRIDGE_PATCH" ./KernelSU/
             cd ./KernelSU
-            patch -p1 < 10_enable_susfs_for_ksu.patch || true
+            patch --batch --forward -p1 < 10_enable_susfs_for_ksu.patch
           elif [[ "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
             echo "ReSukiSU 已原生集成 SUSFS，跳过 KernelSU bridge 补丁。"
           elif [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-            echo "SukiSU builtin 自带 SUSFS Kconfig；已应用内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
+            echo "SukiSU-Nova builtin 自带 SUSFS Kconfig；仅应用官方内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
           fi
+          echo "SUSFS_COMMIT=$SUSFS_COMMIT" >> "$GITHUB_ENV"
+          echo "SUSFS_BRANCH=$SUSFS_BRANCH" >> "$GITHUB_ENV"
+          echo "susfs_commit=$SUSFS_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "✓ 官方 SUSFS $SUSFS_BRANCH@$SUSFS_COMMIT 已检出并应用"
           
-      - name: 为 SukiSU builtin 接入 ARM64 手动 Hooks
-        if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
+      - name: 兼容 SukiSU SUSFS_INLINE 的可选 preinit 接口
+        if: ${{ (github.event.inputs.ksu_type) == 'sukisu' && (inputs.susfs_enable) }}
         working-directory: kernel_workspace
         shell: bash
         run: |
           set -euo pipefail
-          echo "为 SukiSU builtin 检查 Linux 6.6 手动 Hooks（Android 15）..."
+          python3 - <<'PYPREINIT'
+          from pathlib import Path
+
+          path = Path("common/fs/exec.c")
+          source = path.read_text()
+          anchor = "#ifdef CONFIG_KSU_SUSFS\nextern struct static_key_true ksu_su_compat_enabled;"
+          if source.count(anchor) != 1:
+              raise SystemExit("::error::SUSFS exec.c preinit guard insertion point must match exactly once")
+          if "ksu_setup_preinit_file" not in source or "ksu_preinit_handle_post_execveat" not in source:
+              raise SystemExit("::error::SUSFS exec.c does not contain the expected optional preinit calls")
+          if "#define KSU_NO_PREINIT" in source:
+              raise SystemExit("::error::KSU_NO_PREINIT is already defined; refusing duplicate modification")
+
+          source = source.replace(
+              anchor,
+              "#define KSU_NO_PREINIT 1\n" + anchor,
+              1,
+          )
+          if source.count("#define KSU_NO_PREINIT 1") != 1:
+              raise SystemExit("::error::KSU_NO_PREINIT insertion verification failed")
+          path.write_text(source)
+          print("✓ SukiSU SUSFS_INLINE: disabled only the optional KernelSU preinit path guarded by KSU_NO_PREINIT")
+          PYPREINIT
+
+      - name: 为 SukiSU builtin 接入 ARM64 手动 Hooks
+        if: ${{ (github.event.inputs.ksu_type) == 'sukisu' && (inputs.susfs_enable) }}
+        working-directory: kernel_workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "为 SukiSU builtin 接入 Linux 6.6 手动 Hooks（Android 15）..."
           python3 - <<'PYHOOK'
           from pathlib import Path
-          import re
+          import re, sys
 
-          def ensure_hook(path, pattern, marker, replacement, label):
+          def insert_once(path, pattern, replacement, marker, label):
               p = Path(path)
               text = p.read_text()
+              # Idempotency is based on the actual function-call marker, not whitespace-sensitive
+              # matching of the whole inserted block. This prevents duplicate hooks when an
+              # earlier SUSFS patch already added the same call.
               count = text.count(marker)
               if count == 1:
-                  print(f"✓ {label} 已存在且只出现一次，跳过插入")
+                  print(f"✓ {label} 已存在且唯一，跳过")
                   return
               if count > 1:
-                  raise SystemExit(
-                      f"::error::{label}: {path} 中已有 {count} 个调用，拒绝继续，避免重复 Hook"
-                  )
+                  raise SystemExit(f"::error::{label}: {path} 中调用已出现 {count} 次，拒绝自动删除或继续插入")
               matches = list(re.finditer(pattern, text, flags=re.S))
               if len(matches) != 1:
-                  raise SystemExit(
-                      f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个插入位置，拒绝盲目修改"
-                  )
+                  raise SystemExit(f"::error::{label}: 在 {path} 中匹配到 {len(matches)} 个目标位置，拒绝盲目修改")
               m = matches[0]
               text = text[:m.end()] + replacement + text[m.end():]
-              if text.count(marker) != 1:
-                  raise SystemExit(f"::error::{label}: 插入后调用数量异常")
               p.write_text(text)
               print(f"✓ 已插入 {label}")
 
-          # 先检查调用标记再插入：如果 SUSFS 补丁已添加该 Hook，不会再重复插入。
-          ensure_hook(
+          # Linux 6.6 Android common: do_execveat_common has int retval; before first executable logic.
+          insert_once(
               "common/fs/exec.c",
               r"(static int do_execveat_common\s*\([^)]*\)\s*\{(?:(?!\n\}).)*?\n\s*int retval;)",
-              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
               "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
-              "execveat hook")
+              "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);", "execveat hook")
 
-          ensure_hook(
-              "common/fs/open.c",
-              r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
-              "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
-              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
-              "faccessat hook")
+          # SUSFS-enabled SukiSU changes these handler APIs to take struct filename **.
+          # The syscall entry points below expose const char __user * instead, so the
+          # generic user-pointer hooks are ABI-incompatible in this configuration.
+          # Do not inject a conflicting declaration or an invalid call; keep these hooks
+          # disabled unless the source has the user-pointer API expected by the generic guide.
+          open_source = Path("common/fs/open.c").read_text()
+          if re.search(r"ksu_handle_faccessat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", open_source):
+              print("⚠ SUSFS 的 faccessat handler 使用 struct filename **；跳过不兼容的 syscall-level user-pointer hook")
+          else:
+              insert_once(
+                  "common/fs/open.c",
+                  r"(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)",
+                  "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_faccessat(int *, const char __user **, int *, int *);\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
+                  "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);", "faccessat hook")
 
-          ensure_hook(
-              "common/fs/stat.c",
-              r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
-              "ksu_handle_stat(&dfd, &filename, &flag);",
-              "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
-              "newfstatat hook")
+          # Hook sys_newfstatat only when the handler uses the user-pointer API.
+          stat_source = Path("common/fs/stat.c").read_text()
+          if re.search(r"ksu_handle_stat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", stat_source):
+              print("⚠ SUSFS 的 stat handler 使用 struct filename **；跳过不兼容的 syscall-level user-pointer hook")
+          else:
+              insert_once(
+                  "common/fs/stat.c",
+                  r"(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{\s*struct kstat stat;\s*int error;)",
+                  "\n#ifdef CONFIG_KSU\n\textern int ksu_handle_stat(int *, const char __user **, int *);\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
+                  "ksu_handle_stat(&dfd, &filename, &flag);", "newfstatat hook")
 
-          ensure_hook(
+          # New KernelSU supercall reboot hook.
+          insert_once(
               "common/kernel/reboot.c",
               r"(SYSCALL_DEFINE4\(reboot,\s*int,\s*magic1,\s*int,\s*magic2,\s*unsigned int,\s*cmd,\s*void __user \*,\s*arg\)\s*\{(?:(?!\n\}).)*?\n\s*int ret = 0;)",
-              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
               "\n#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)\n\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif",
-              "reboot hook")
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);", "reboot hook")
 
+          # Fail closed: all four known Android 15 / 6.6 entry points must be present exactly once.
           checks = {
-              "common/fs/exec.c": "ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);",
-              "common/fs/open.c": "ksu_handle_faccessat(&dfd, &filename, &mode, NULL);",
-              "common/fs/stat.c": "ksu_handle_stat(&dfd, &filename, &flag);",
-              "common/kernel/reboot.c": "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
+              "common/fs/exec.c": ["ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);"],
+              "common/kernel/reboot.c": ["ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);"]
           }
-          for path, marker in checks.items():
-              count = Path(path).read_text().count(marker)
-              if count != 1:
-                  raise SystemExit(f"::error::Hook 验证失败：{path} 中调用出现 {count} 次（要求恰好一次）")
-              print(f"✓ {path}: Hook 调用恰好一次")
-
-          print("四个 Hook 的文本数量检查通过。注意：这不等于内核已成功编译或 KPM 已可用。")
+          # Validate user-pointer hooks only when the corresponding SUSFS filename** API is absent.
+          if not re.search(r"ksu_handle_faccessat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", Path("common/fs/open.c").read_text()):
+              checks["common/fs/open.c"] = ["ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"]
+          if not re.search(r"ksu_handle_stat\s*\(\s*int\s*\*\s*dfd\s*,\s*struct filename\s*\*\*", Path("common/fs/stat.c").read_text()):
+              checks["common/fs/stat.c"] = ["ksu_handle_stat(&dfd, &filename, &flag);"]
+          for path, needles in checks.items():
+              content = Path(path).read_text()
+              for needle in needles:
+                  count = content.count(needle)
+                  if count != 1:
+                      print(f"::error::Hook 验证失败：{path} 中 {needle!r} 出现 {count} 次")
+                      for i, line in enumerate(content.splitlines(), 1):
+                          if needle in line:
+                              print(f"  {path}:{i}: {line.strip()}")
+                      raise SystemExit(1)
+          print("已验证 execveat / faccessat / newfstatat / reboot 四个 Hook。")
+          print("提示：Android 15 不强制要求 Android 16 新增的 newfstat 返回 Hook。")
           PYHOOK
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
-        if: inputs.lz4_enable
+        if: (inputs.lz4_enable)
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
           cd kernel_workspace
@@ -445,7 +623,7 @@ jobs:
           echo "✅ lz4 1.10.0 + zstd 1.5.7 补丁已全部生效"
 
       - name: 应用 lz4kd 补丁
-        if: inputs.lz4kd_enable
+        if: (inputs.lz4kd_enable)
         run: |
           echo "正在添加lz4kd补丁…"
           cd kernel_workspace
@@ -460,7 +638,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -473,6 +651,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y" >> ./common/arch/arm64/configs/gki_defconfig
           
       - name: 添加 KSU & 其他配置项
         run: |
@@ -483,7 +662,7 @@ jobs:
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
 
-          # SukiSU Ultra 官方集成文档要求通过 CONFIG_KPM=y 启用 KPM。
+          # SukiSU-Nova 官方集成文档要求通过 CONFIG_KPM=y 启用 KPM。
           # 不在源码目录中无参数运行 patch_linux；该方式无法证明补丁已生效。
           if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
             if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" || "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
@@ -514,7 +693,7 @@ jobs:
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.6.patch
           
       - name: 启用网络功能增强优化配置
-        if: inputs.better_net
+        if: (inputs.better_net)
         run: |
           cd kernel_workspace
           echo "CONFIG_BPF_STREAM_PARSER=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -574,7 +753,32 @@ jobs:
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
             patch -p1 -F 3 < fix_oplus_bsp_midas.patch || true
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/ddl_hit_hook.patch
-            patch -p1 -F 3 < ddl_hit_hook.patch || true
+            patch --batch --forward -p1 -F 3 < ddl_hit_hook.patch
+            python3 - <<'PYDDL'
+          from pathlib import Path
+          import re
+
+          p = Path("kernel/module/main.c")
+          if not p.is_file():
+              raise SystemExit("::error::ddl_hit_hook.patch 后未找到 kernel/module/main.c")
+          source = p.read_text()
+          required = {
+              "bounds-checked replacement": r"void update_ddl_hit_history_new\s*\(struct task_struct \*p\)",
+              "PID upper-bound guard": r"p->pid\s*>=\s*PID_MAX_DEFAULT",
+              "data symbol lookup": r'kallsyms_lookup_name\("ddl_sdata"\)',
+              "original function lookup": r'kallsyms_lookup_name\("update_ddl_hit_history"\)',
+              "module name guard": r'strcmp\(mod->name,\s*"oplus_bsp_sched_assist"\)',
+              "module-load hook": r"hook_sched_assist_module\(mod\);",
+              "ARM64 text patch": r"aarch64_insn_patch_text_nosync",
+          }
+          for label, pattern in required.items():
+              hits = len(re.findall(pattern, source))
+              if hits != 1:
+                  raise SystemExit(f"::error::ddl_hit_hook semantic check failed: {label}, expected 1 match, got {hits}")
+          if "ddl_hit_hook: update_ddl_hit_history patched" not in source:
+              raise SystemExit("::error::ddl_hit_hook success log marker missing")
+          print("✓ ddl_hit_hook.patch semantic verification passed (PID bounds, target symbol, module guard, ARM64 hook)")
+          PYDDL
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
             patch -p1 -F 3 < ntsync_base.patch || true
@@ -601,8 +805,15 @@ jobs:
             fi
           fi
 
+      - name: 启用 Landlock 沙箱支持
+        run: |
+          echo "启用 Linux Landlock LSM 支持..."
+          cd kernel_workspace
+          echo "CONFIG_SECURITY=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_SECURITY_LANDLOCK=y" >> ./common/arch/arm64/configs/gki_defconfig
+
       - name: 启用ADIOS IO调度器
-        if: inputs.adios_enable
+        if: (inputs.adios_enable)
         run: |
           echo "正在启用ADIOS IO调度器…"
           cd kernel_workspace
@@ -610,14 +821,14 @@ jobs:
           echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
 
       - name: 启用Re-Kernel支持
-        if: inputs.rekernel_enable
+        if: (inputs.rekernel_enable)
         run: |
           echo "正在启用Re-Kernel支持…"
           cd kernel_workspace
           echo "CONFIG_REKERNEL=y" >> ./common/arch/arm64/configs/gki_defconfig
 
       - name: 启用内核级基带保护
-        if: inputs.baseband_guard
+        if: (inputs.baseband_guard)
         run: |
           echo "正在启用启用内核级基带保护支持…"
           cd kernel_workspace
@@ -699,11 +910,67 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
+
+          # gki_defconfig 由多个功能步骤追加配置。保留每个 CONFIG_* 的最后一次赋值，
+          # 等价于 Kconfig 原本的“后写覆盖前写”，同时消除重复定义警告。
+          CONFIG_FILE=arch/arm64/configs/gki_defconfig
+          CONFIG_BEFORE=$(grep -Ec '^(# )?CONFIG_[A-Za-z0-9_]+' "$CONFIG_FILE" || true)
+          CONFIG_TMP=$(mktemp)
+          awk '
+            {
+              lines[NR] = $0
+              if (match($0, /^(# )?CONFIG_[A-Za-z0-9_]+/)) {
+                key = substr($0, RSTART, RLENGTH)
+                sub(/^# /, "", key)
+                last[key] = NR
+              }
+            }
+            END {
+              for (i = 1; i <= NR; i++) {
+                if (match(lines[i], /^(# )?CONFIG_[A-Za-z0-9_]+/)) {
+                  key = substr(lines[i], RSTART, RLENGTH)
+                  sub(/^# /, "", key)
+                  if (last[key] != i) continue
+                }
+                print lines[i]
+              }
+            }
+          ' "$CONFIG_FILE" > "$CONFIG_TMP"
+          mv "$CONFIG_TMP" "$CONFIG_FILE"
+          CONFIG_AFTER=$(grep -Ec '^(# )?CONFIG_[A-Za-z0-9_]+' "$CONFIG_FILE" || true)
+          echo "gki_defconfig 重复项清理完成：$CONFIG_BEFORE 条配置记录 -> $CONFIG_AFTER 条（保留最后一次赋值）"
+          DUP_CONFIGS=$(awk '
+            match($0, /^(# )?CONFIG_[A-Za-z0-9_]+/) {
+              key = substr($0, RSTART, RLENGTH)
+              sub(/^# /, "", key)
+              count[key]++
+            }
+            END {
+              for (key in count) if (count[key] > 1) print key
+            }
+          ' "$CONFIG_FILE")
+          if [[ -n "$DUP_CONFIGS" ]]; then
+            echo "::error::gki_defconfig 重复配置清理后仍检测到重复项："
+            echo "$DUP_CONFIGS"
+            exit 1
+          fi
+
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+          # Landlock 配置必须真实进入最终 .config，并在启动时启用。
+          if ! grep -q '^CONFIG_SECURITY_LANDLOCK=y$' out/.config; then
+            echo "::error::CONFIG_SECURITY_LANDLOCK 未生效，停止编译"
+            exit 1
+          fi
+          if ! grep -q '^CONFIG_LSM="landlock,' out/.config; then
+            echo "::error::CONFIG_LSM 未将 landlock 放在首位，停止编译"
+            grep '^CONFIG_LSM=' out/.config || true
+            exit 1
+          fi
+          echo "Landlock 配置校验通过"
 
           # SUSFS 配置前置门禁：在耗时的 Image 编译前确认 Kconfig 确实识别了所有选项。
           if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
-            for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
+            for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER; do
               if ! grep -q "^${sym}=y$" out/.config; then
                 echo "::error::gki_defconfig 后 ${sym}=y 未生效；停止编译以避免生成不含完整 SUSFS 的内核"
                 grep -E "^(CONFIG_KSU_SUSFS|# CONFIG_KSU_SUSFS)" out/.config || true
@@ -721,49 +988,8 @@ jobs:
           ccache -s
           df -h
 
-      - name: 注入 KernelPatch KPM 核心映像
-        if: ${{ inputs.kpm_enable && (github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'resukisu') }}
-        working-directory: kernel_workspace/common/out/arch/arm64/boot
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -s Image
-          cp Image Image.before-kpm
-
-          # Actions 不会自动检出本仓库根目录的 kpm_patch/，因此从官方 0.13.9 Release 获取工具。
-          BASE="https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.13.9"
-          curl -fL --retry 3 "$BASE/kpimg" -o kpimg
-          curl -fL --retry 3 "$BASE/kptools-linux" -o kptools-linux
-          chmod +x kptools-linux
-
-          echo "===== KernelPatch 工具 ====="
-          file kpimg kptools-linux
-          ./kptools-linux --version
-          ./kptools-linux --version --kpimg kpimg
-          ./kptools-linux --list --kpimg kpimg
-
-          echo "===== 注入前镜像 ====="
-          sha256sum Image.before-kpm
-
-          # 输出到独立文件，先不覆盖原始 Image。
-          ./kptools-linux --patch \
-            --image Image.before-kpm \
-            --kpimg kpimg \
-            --out Image.kpm
-
-          test -s Image.kpm
-          echo "===== 补丁后镜像信息 ====="
-          ls -lh Image.before-kpm Image.kpm
-          sha256sum Image.before-kpm Image.kpm
-          ./kptools-linux --list --image Image.kpm
-
-          # 只有工具成功生成并能读取补丁信息后，才将补丁镜像作为后续打包输入。
-          cp Image.kpm Image
-          echo "已将 KernelPatch 注入后的 Image 设为后续打包输入。"
-
       - name: 硬性验证 SUSFS 关键 CONFIG 已编入最终 .config
-        if: ${{ inputs.susfs_enable && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -774,7 +1000,7 @@ jobs:
           fi
           echo "===== 校验最终 SUSFS .config ====="
           fail=0
-          for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS ; do
+          for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER ; do
             line=$(grep -E "^${sym}=" "$CONFIG" || true)
             if [[ "$line" != "${sym}=y" ]]; then
               echo "::error::${sym} 未以 =y 编入最终 .config（实际值: '${line:-未找到}'）"
@@ -790,7 +1016,7 @@ jobs:
           echo "✅ SUSFS 验证通过"
 
       - name: 硬性验证 KPM CONFIG 已编入最终 .config
-        if: ${{ inputs.kpm_enable && (github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'resukisu') }}
+        if: ${{ (inputs.kpm_enable) && ((github.event.inputs.ksu_type) == 'sukisu' || (github.event.inputs.ksu_type) == 'resukisu') }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -806,7 +1032,7 @@ jobs:
           echo "✅ KPM 配置验证通过"
 
       - name: 保存新的 ccache 缓存
-        if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
+        if: (inputs.ccache_update) || steps.ccache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -862,6 +1088,10 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+            echo "SUSFS Branch: ${SUSFS_BRANCH}" >> ./ak3.log
+            echo "SUSFS Commit: ${SUSFS_COMMIT}" >> ./ak3.log
+          fi
           if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "SukiSU Branch: ${SUKISU_BRANCH}" >> ./ak3.log
             echo "SukiSU Commit: ${SUKISU_COMMIT}" >> ./ak3.log
@@ -879,7 +1109,7 @@ jobs:
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
-        if: always() && inputs.ccache_debug
+        if: always() && (inputs.ccache_debug)
         uses: actions/upload-artifact@v7
         with:
           name: ccache-debug-log
@@ -927,7 +1157,7 @@ jobs:
           TAG_HEAD="OPPO-OPlus-Realme-build"
           echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            KSU_TYPENAME="SukiSU Ultra"
+            KSU_TYPENAME="SukiSU-Nova"
           elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
             KSU_TYPENAME="ReSukiSU"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
@@ -961,22 +1191,23 @@ jobs:
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
-          - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
+          - SukiSU-Nova管理器下载：[SukiSU-Nova](https://github.com/SukiSU-Nova/SukiSU-Nova/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
-          - SukiSU 官方提交：${{ needs.build.outputs.sukisu_commit }}
+          - SukiSU-Nova 官方提交：${{ needs.build.outputs.sukisu_commit }}
+          - SUSFS 官方提交：${{ needs.build.outputs.susfs_commit }}
           - SukiSU 勾选 SUSFS 时使用官方 builtin 集成分支并启用 ARM64 branch-link hook；关闭时使用官方 main 分支。
           
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
-          3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
+          3. 若你之前已刷入SukiSU-Nova内核，且SukiSU-Nova管理器已更新至最新版本，可在SukiSU-Nova管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU Ultra 勾选 SUSFS 时会切换到官方 builtin 分支，启用 ARM64 branch-link hook，并在 Image 编译前验证最终 .config。
+          6. 当前内核的 KPM 通过 CONFIG_KPM 配置启用（本工作流仅对 SukiSU / ReSukiSU 开放此选项）；SukiSU-Nova 勾选 SUSFS 时会切换到官方 builtin 分支，启用 ARM64 branch-link hook，并在 Image 编译前验证最终 .config。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
