@@ -313,10 +313,40 @@ jobs:
 
             cd ./KernelSU
             SUKISU_COMMIT_SHORT=$(git rev-parse --short=12 HEAD)
-            KSU_VERSION=$(grep -m1 '^KSU_VERSION' kernel/Kbuild | grep -oE '[0-9]+(-[a-zA-Z0-9]+)?' | head -n1 || true)
-            if [[ -z "$KSU_VERSION" ]]; then
-              KSU_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo "unknown")
+
+            # 与 SukiSU-Nova kernel/Makefile 保持同一版本计算方式：
+            # KSU_VERSION = VERSION_BASE + main 分支提交总数 - VERSION_OFFSET。
+            KSU_MAKEFILE=kernel/Makefile
+            if [[ ! -s "$KSU_MAKEFILE" ]]; then
+              echo "::error::SukiSU-Nova 缺少 kernel/Makefile，无法读取官方版本计算参数"
+              exit 1
             fi
+            read_make_var() {
+              sed -nE "s/^[[:space:]]*$1[[:space:]]*:?=[[:space:]]*([^[:space:]#]+).*$/\\1/p" "$KSU_MAKEFILE" | head -n1
+            }
+            KSU_VERSION_BASE=$(read_make_var VERSION_BASE)
+            KSU_VERSION_OFFSET=$(read_make_var VERSION_OFFSET)
+            KSU_VERSION_BRANCH=$(read_make_var REPO_BRANCH)
+            if [[ ! "$KSU_VERSION_BASE" =~ ^[0-9]+$ || ! "$KSU_VERSION_OFFSET" =~ ^[0-9]+$ || -z "$KSU_VERSION_BRANCH" ]]; then
+              echo "::error::无法从 SukiSU-Nova kernel/Makefile 解析 VERSION_BASE/VERSION_OFFSET/REPO_BRANCH"
+              exit 1
+            fi
+
+            KSU_COMMIT_COUNT=$(curl --fail --silent --show-error --location --retry 3 --retry-delay 2 --head \
+              "https://api.github.com/repos/SukiSU-Nova/SukiSU-Nova/commits?sha=$KSU_VERSION_BRANCH&per_page=1" \
+              | tr -d '\\r' \
+              | sed -nE 's/.*[?&]page=([0-9]+)>;[[:space:]]*rel="last".*/\\1/p' \
+              | tail -n1)
+            if [[ ! "$KSU_COMMIT_COUNT" =~ ^[0-9]+$ ]]; then
+              echo "::error::无法从 SukiSU-Nova 官方 API 获取 $KSU_VERSION_BRANCH 分支提交总数，拒绝生成错误版本号"
+              exit 1
+            fi
+            KSU_VERSION=$((KSU_VERSION_BASE + KSU_COMMIT_COUNT - KSU_VERSION_OFFSET))
+            if (( KSU_VERSION <= 0 )); then
+              echo "::error::计算得到的 SukiSU-Nova 版本号无效：$KSU_VERSION"
+              exit 1
+            fi
+            echo "SukiSU-Nova 官方版本计算：$KSU_VERSION_BASE + $KSU_COMMIT_COUNT - $KSU_VERSION_OFFSET = $KSU_VERSION"
             echo "SUKISU_COMMIT=$SUKISU_COMMIT" >> "$GITHUB_ENV"
             echo "SUKISU_BRANCH=$SUKISU_BRANCH" >> "$GITHUB_ENV"
             echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
@@ -880,6 +910,51 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
+
+          # gki_defconfig 由多个功能步骤追加配置。保留每个 CONFIG_* 的最后一次赋值，
+          # 等价于 Kconfig 原本的“后写覆盖前写”，同时消除重复定义警告。
+          CONFIG_FILE=arch/arm64/configs/gki_defconfig
+          CONFIG_BEFORE=$(grep -Ec '^(# )?CONFIG_[A-Za-z0-9_]+' "$CONFIG_FILE" || true)
+          CONFIG_TMP=$(mktemp)
+          awk '
+            {
+              lines[NR] = $0
+              if (match($0, /^(# )?CONFIG_[A-Za-z0-9_]+/)) {
+                key = substr($0, RSTART, RLENGTH)
+                sub(/^# /, "", key)
+                last[key] = NR
+              }
+            }
+            END {
+              for (i = 1; i <= NR; i++) {
+                if (match(lines[i], /^(# )?CONFIG_[A-Za-z0-9_]+/)) {
+                  key = substr(lines[i], RSTART, RLENGTH)
+                  sub(/^# /, "", key)
+                  if (last[key] != i) continue
+                }
+                print lines[i]
+              }
+            }
+          ' "$CONFIG_FILE" > "$CONFIG_TMP"
+          mv "$CONFIG_TMP" "$CONFIG_FILE"
+          CONFIG_AFTER=$(grep -Ec '^(# )?CONFIG_[A-Za-z0-9_]+' "$CONFIG_FILE" || true)
+          echo "gki_defconfig 重复项清理完成：$CONFIG_BEFORE 条配置记录 -> $CONFIG_AFTER 条（保留最后一次赋值）"
+          DUP_CONFIGS=$(awk '
+            match($0, /^(# )?CONFIG_[A-Za-z0-9_]+/) {
+              key = substr($0, RSTART, RLENGTH)
+              sub(/^# /, "", key)
+              count[key]++
+            }
+            END {
+              for (key in count) if (count[key] > 1) print key
+            }
+          ' "$CONFIG_FILE")
+          if [[ -n "$DUP_CONFIGS" ]]; then
+            echo "::error::gki_defconfig 重复配置清理后仍检测到重复项："
+            echo "$DUP_CONFIGS"
+            exit 1
+          fi
+
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
           # Landlock 配置必须真实进入最终 .config，并在启动时启用。
           if ! grep -q '^CONFIG_SECURITY_LANDLOCK=y$' out/.config; then
