@@ -444,6 +444,105 @@ jobs:
               "reboot hook")
           PYHOOK
 
+      - name: 补齐 SUSFS 与 SukiSU builtin 的 preinit 兼容接口
+        if: ${{ github.event.inputs.ksu_type == 'sukisu' && inputs.susfs_enable }}
+        working-directory: kernel_workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYSUSFS'
+          from pathlib import Path
+          import re
+
+          ksu_dir = Path("KernelSU/kernel")
+          makefile = ksu_dir / "Makefile"
+          if not ksu_dir.is_dir() or not makefile.is_file():
+              raise SystemExit("::error::未找到 SukiSU kernel 源码目录或 Makefile")
+
+          symbols = {
+              "ksu_setup_preinit_file": """int ksu_setup_preinit_file(struct filename **filename_ptr, struct user_arg_ptr *argv_user)
+          {
+              (void)filename_ptr;
+              (void)argv_user;
+              return -EINVAL;
+          }""",
+              "ksu_preinit_handle_post_execveat": """int ksu_preinit_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                  void *argv_user, void *envp_user, int *flags, int *retval, int *preinit_fd)
+          {
+              (void)fd;
+              (void)filename_ptr;
+              (void)argv_user;
+              (void)envp_user;
+              (void)flags;
+              (void)retval;
+              (void)preinit_fd;
+              return 0;
+          }""",
+          }
+
+          def global_definitions(symbol):
+              pattern = re.compile(
+                  rf"(?m)^\s*(?!static\b)(?:__weak\s+)?int\s+{re.escape(symbol)}\s*\([^;{{}}]*\)\s*\{{"
+              )
+              found = []
+              for path in ksu_dir.rglob("*"):
+                  if path.suffix not in {".c", ".h"} or not path.is_file():
+                      continue
+                  source = path.read_text(errors="replace")
+                  for match in pattern.finditer(source):
+                      found.append((path, source.count("\n", 0, match.start()) + 1))
+              return found
+
+          missing = []
+          for symbol in symbols:
+              defs = global_definitions(symbol)
+              if len(defs) > 1:
+                  raise SystemExit(f"::error::{symbol} 存在多个全局定义：{defs}")
+              if not defs:
+                  missing.append(symbol)
+              else:
+                  print(f"✓ {symbol}: 已有全局定义 {defs[0][0]}:{defs[0][1]}")
+
+          if missing:
+              # SukiSU Makefile reports this exact condition when preinit is disabled.
+              if Path("common/usr/include").is_dir():
+                  raise SystemExit(
+                      "::error::preinit 目录缺失但 common/usr/include 存在；"
+                      "不能在 preinit 应启用时自动添加空实现"
+                  )
+
+              compat = ksu_dir / "susfs_preinit_compat.c"
+              if compat.exists():
+                  raise SystemExit("::error::兼容文件已存在，但缺少接口仍未解决，拒绝覆盖")
+              chunks = [
+                  "/* SUSFS compatibility: SukiSU builtin has preinit disabled. */",
+                  "#include <linux/errno.h>",
+                  "struct filename;",
+                  "struct user_arg_ptr;",
+                  "",
+              ]
+              chunks.extend(symbols[s] for s in missing)
+              compat.write_text("\n\n".join(chunks) + "\n")
+              line = "obj-y += susfs_preinit_compat.o"
+              mk = makefile.read_text()
+              if line not in mk.splitlines():
+                  makefile.write_text(mk.rstrip() + "\n" + line + "\n")
+              print("✓ 已为 preinit-disabled 构建补齐兼容接口：" + ", ".join(missing))
+          else:
+              print("✓ 两个 SUSFS preinit 接口均已有实现，不添加兼容文件")
+
+          # Final hard verification: exactly one global definition for each symbol,
+          # and the compatibility object is wired into Kbuild when it was needed.
+          for symbol in symbols:
+              defs = global_definitions(symbol)
+              if len(defs) != 1:
+                  raise SystemExit(f"::error::{symbol} 最终全局定义数为 {len(defs)}，要求恰好 1")
+          if (ksu_dir / "susfs_preinit_compat.c").exists():
+              if "obj-y += susfs_preinit_compat.o" not in makefile.read_text().splitlines():
+                  raise SystemExit("::error::susfs_preinit_compat.o 未加入 SukiSU Kbuild")
+          print("✓ SUSFS preinit 符号与 Kbuild 验证通过")
+          PYSUSFS
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
