@@ -612,8 +612,9 @@ jobs:
             done
             if [[ "${{ github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
               echo "正在启用容器环境扩展支持..."
-              # BT_HCIVHCI 位于 drivers/bluetooth/Kconfig 的 depends on BT 菜单内；
-              # 必须先启用 Bluetooth 核心，否则该符号不会进入最终 .config。
+              # 上游 defconfig 将 RFKILL 设为 m；BT 的依赖表达式 RFKILL || !RFKILL 因而最高只能为 m。
+              # 将 RFKILL 内建后，Bluetooth 核心和 HCIVHCI 才能按要求内建为 y。
+              echo "CONFIG_RFKILL=y" >> ./arch/arm64/configs/gki_defconfig
               echo "CONFIG_BT=y" >> ./arch/arm64/configs/gki_defconfig
               echo "CONFIG_BT_HCIVHCI=y" >> ./arch/arm64/configs/gki_defconfig
               echo "CONFIG_STATIC_USERMODEHELPER=n" >> ./arch/arm64/configs/gki_defconfig
