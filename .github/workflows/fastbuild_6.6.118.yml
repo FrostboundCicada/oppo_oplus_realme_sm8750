@@ -381,7 +381,7 @@ jobs:
             --exclude-dir=.git 2>/dev/null | head -n 100 || true
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) != 'none' }}
         run: |
           cd kernel_workspace
           echo "正在添加susfs补丁..."
@@ -405,7 +405,7 @@ jobs:
           fi
           
       - name: 兼容 SukiSU SUSFS_INLINE 的可选 preinit 接口
-        if: ${{ github.event.inputs.ksu_type == 'sukisu' && (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) }}
+        if: ${{ (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'sukisu' && (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) }}
         working-directory: kernel_workspace
         shell: bash
         run: |
@@ -435,7 +435,7 @@ jobs:
           PYPREINIT
 
       - name: 为 SukiSU builtin 接入 ARM64 手动 Hooks
-        if: ${{ github.event.inputs.ksu_type == 'sukisu' && (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) }}
+        if: ${{ (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'sukisu' && (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) }}
         working-directory: kernel_workspace
         shell: bash
         run: |
@@ -567,7 +567,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) != 'none' }}
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -847,7 +847,7 @@ jobs:
           df -h
 
       - name: 硬性验证 SUSFS 关键 CONFIG 已编入最终 .config
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && github.event.inputs.ksu_type != 'none' }}
+        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_SUSFS_ENABLE) || inputs.susfs_enable) && (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) != 'none' }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
@@ -874,7 +874,7 @@ jobs:
           echo "✅ SUSFS 验证通过"
 
       - name: 硬性验证 KPM CONFIG 已编入最终 .config
-        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_KPM_ENABLE) || inputs.kpm_enable) && (github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'resukisu') }}
+        if: ${{ (github.event_name == 'push' && fromJSON(env.AUTO_KPM_ENABLE) || inputs.kpm_enable) && ((github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'sukisu' || (github.event_name == 'push' && env.AUTO_KSU_TYPE || github.event.inputs.ksu_type) == 'resukisu') }}
         working-directory: kernel_workspace/common
         run: |
           set -eu
