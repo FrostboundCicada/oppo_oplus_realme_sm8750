@@ -102,6 +102,7 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
       sukisu_commit: ${{ steps.ksu_version.outputs.sukisu_commit }}
+      susfs_commit: ${{ steps.susfs_version.outputs.susfs_commit }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
     permissions:
       actions: write
@@ -259,25 +260,33 @@ jobs:
         run: |
           cd kernel_workspace
           if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-            echo "正在配置 SukiSU Ultra 官方最新提交..."
+            set -euo pipefail
+            echo "正在配置 SukiSU-Nova 官方最新提交..."
             if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
-              # 官方 builtin 分支携带 SUSFS Kconfig；ARM64 通过官方 branch-link hook 避免手工逐个插桩。
+              # builtin 分支携带 SUSFS Kconfig；必须与官方 builtin 分支当前 HEAD 精确一致。
               SUKISU_BRANCH="builtin"
             else
               SUKISU_BRANCH="main"
             fi
-            echo "SukiSU 集成分支：$SUKISU_BRANCH"
-            curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- "$SUKISU_BRANCH"
-
-            # 不允许 setup 脚本静默回退到其他分支；确认实际 checkout 和必要 Kconfig 均存在。
-            if [[ ! -d ./KernelSU/.git ]]; then
-              echo "::error::SukiSU setup 后未找到 ./KernelSU Git 仓库"
+            SUKISU_REPO="https://github.com/SukiSU-Nova/SukiSU-Nova.git"
+            SUKISU_REMOTE_HEAD=$(git ls-remote "$SUKISU_REPO" "refs/heads/$SUKISU_BRANCH" | awk 'NR==1 {print $1}')
+            if [[ ! "$SUKISU_REMOTE_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::无法从 SukiSU-Nova 官方仓库解析 $SUKISU_BRANCH 最新提交"
               exit 1
             fi
-            ACTUAL_SUKISU_BRANCH=$(git -C ./KernelSU branch --show-current)
-            echo "实际 SukiSU 分支：${ACTUAL_SUKISU_BRANCH:-detached HEAD}"
-            if [[ "$ACTUAL_SUKISU_BRANCH" != "$SUKISU_BRANCH" ]]; then
-              echo "::error::SukiSU 分支不匹配：期望 $SUKISU_BRANCH，实际 ${ACTUAL_SUKISU_BRANCH:-detached HEAD}"
+            echo "SukiSU-Nova 分支：$SUKISU_BRANCH"
+            echo "SukiSU-Nova 最新提交：$SUKISU_REMOTE_HEAD"
+            curl -fLSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" | bash -s -- "$SUKISU_REMOTE_HEAD"
+
+            # setup.sh 会尝试切换到指定提交；这里以 GitHub 官方分支 HEAD 为准做精确校验。
+            if [[ ! -d ./KernelSU/.git ]]; then
+              echo "::error::SukiSU-Nova setup 后未找到 ./KernelSU Git 仓库"
+              exit 1
+            fi
+            SUKISU_COMMIT=$(git -C ./KernelSU rev-parse HEAD)
+            if [[ "$SUKISU_COMMIT" != "$SUKISU_REMOTE_HEAD" ]]; then
+              echo "::error::SukiSU-Nova 源码与官方 $SUKISU_BRANCH 最新提交不一致：期望 $SUKISU_REMOTE_HEAD，实际 $SUKISU_COMMIT"
+              git -C ./KernelSU remote -v || true
               exit 1
             fi
             if [[ "$SUKISU_BRANCH" == "builtin" ]]; then
@@ -286,10 +295,9 @@ jobs:
                 exit 1
               fi
             fi
-            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@SukiSU-Nova"' >> ./common/arch/arm64/configs/gki_defconfig
 
             cd ./KernelSU
-            SUKISU_COMMIT=$(git rev-parse HEAD)
             SUKISU_COMMIT_SHORT=$(git rev-parse --short=12 HEAD)
             KSU_VERSION=$(grep -m1 '^KSU_VERSION' kernel/Kbuild | grep -oE '[0-9]+(-[a-zA-Z0-9]+)?' | head -n1 || true)
             if [[ -z "$KSU_VERSION" ]]; then
@@ -362,29 +370,66 @@ jobs:
             --include='*.yaml' --include='*.patch' \
             --exclude-dir=.git 2>/dev/null | head -n 100 || true
 
-      - name: 应用 KernelSU & SUSFS 补丁
+      - name: 应用官方 SUSFS 补丁
+        id: susfs_version
         if: ${{ (inputs.susfs_enable) && (github.event.inputs.ksu_type) != 'none' }}
         run: |
+          set -euo pipefail
           cd kernel_workspace
-          echo "正在添加susfs补丁..."
-          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          SUSFS_BRANCH="gki-${ANDROID_VERSION}-${KERNEL_VERSION}"
+          SUSFS_REMOTE_HEAD=$(git ls-remote "$SUSFS_REPO" "refs/heads/$SUSFS_BRANCH" | awk 'NR==1 {print $1}')
+          if [[ ! "$SUSFS_REMOTE_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::无法从官方 SUSFS 仓库解析分支 $SUSFS_BRANCH 的最新提交"
+            exit 1
+          fi
+          echo "官方 SUSFS 仓库：$SUSFS_REPO"
+          echo "官方 SUSFS 分支：$SUSFS_BRANCH"
+          echo "官方 SUSFS 最新提交：$SUSFS_REMOTE_HEAD"
+
+          git clone --depth=1 --branch "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu
+          SUSFS_COMMIT=$(git -C susfs4ksu rev-parse HEAD)
+          if [[ "$SUSFS_COMMIT" != "$SUSFS_REMOTE_HEAD" ]]; then
+            echo "::error::SUSFS checkout 与官方分支最新 HEAD 不一致：期望 $SUSFS_REMOTE_HEAD，实际 $SUSFS_COMMIT"
+            exit 1
+          fi
+          SUSFS_KERNEL_PATCH="./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
+          if [[ ! -s "$SUSFS_KERNEL_PATCH" ]]; then
+            echo "::error::官方 SUSFS 缺少目标内核补丁：$SUSFS_KERNEL_PATCH"
+            find ./susfs4ksu/kernel_patches -maxdepth 2 -type f -print
+            exit 1
+          fi
+          if [[ ! -d ./susfs4ksu/kernel_patches/fs || ! -d ./susfs4ksu/kernel_patches/include/linux ]]; then
+            echo "::error::官方 SUSFS 内核源码目录不完整"
+            exit 1
+          fi
+          cp -a ./susfs4ksu/kernel_patches/fs/. ./common/fs/
+          cp -a ./susfs4ksu/kernel_patches/include/linux/. ./common/include/linux/
+          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch" -O ./common/69_hide_stuff.patch
           cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-          patch -p1 -N -F 3 < 69_hide_stuff.patch || true
+          echo "===== 严格应用官方 SUSFS 内核补丁 ====="
+          patch --batch --forward -p1 < "../$SUSFS_KERNEL_PATCH"
+          echo "===== 应用仓库内既有 69_hide_stuff.patch ====="
+          patch --batch --forward -p1 -F 3 < 69_hide_stuff.patch
           cd ..
           if [[ "${{ github.event.inputs.ksu_type }}" == "ksu" ]]; then
-            cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+            KSU_BRIDGE_PATCH="./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+            if [[ ! -s "$KSU_BRIDGE_PATCH" ]]; then
+              echo "::error::官方 SUSFS 缺少 KernelSU bridge 补丁"
+              exit 1
+            fi
+            cp "$KSU_BRIDGE_PATCH" ./KernelSU/
             cd ./KernelSU
-            patch -p1 < 10_enable_susfs_for_ksu.patch || true
+            patch --batch --forward -p1 < 10_enable_susfs_for_ksu.patch
           elif [[ "${{ github.event.inputs.ksu_type }}" == "resukisu" ]]; then
             echo "ReSukiSU 已原生集成 SUSFS，跳过 KernelSU bridge 补丁。"
           elif [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
-            echo "SukiSU builtin 自带 SUSFS Kconfig；已应用内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
+            echo "SukiSU-Nova builtin 自带 SUSFS Kconfig；仅应用官方内核侧 SUSFS 补丁，跳过 KernelSU bridge 补丁。"
           fi
+          echo "SUSFS_COMMIT=$SUSFS_COMMIT" >> "$GITHUB_ENV"
+          echo "SUSFS_BRANCH=$SUSFS_BRANCH" >> "$GITHUB_ENV"
+          echo "susfs_commit=$SUSFS_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "✓ 官方 SUSFS $SUSFS_BRANCH@$SUSFS_COMMIT 已检出并应用"
           
       - name: 兼容 SukiSU SUSFS_INLINE 的可选 preinit 接口
         if: ${{ (github.event.inputs.ksu_type) == 'sukisu' && (inputs.susfs_enable) }}
@@ -562,6 +607,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y" >> ./common/arch/arm64/configs/gki_defconfig
           
       - name: 添加 KSU & 其他配置项
         run: |
@@ -663,7 +709,32 @@ jobs:
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
             patch -p1 -F 3 < fix_oplus_bsp_midas.patch || true
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/ddl_hit_hook.patch
-            patch -p1 -F 3 < ddl_hit_hook.patch || true
+            patch --batch --forward -p1 -F 3 < ddl_hit_hook.patch
+            python3 - <<'PYDDL'
+            from pathlib import Path
+            import re
+
+            p = Path("kernel/module/main.c")
+            if not p.is_file():
+                raise SystemExit("::error::ddl_hit_hook.patch 后未找到 kernel/module/main.c")
+            source = p.read_text()
+            required = {
+                "bounds-checked replacement": r"void update_ddl_hit_history_new\s*\(struct task_struct \*p\)",
+                "PID upper-bound guard": r"p->pid\s*>=\s*PID_MAX_DEFAULT",
+                "data symbol lookup": r'kallsyms_lookup_name\("ddl_sdata"\)',
+                "original function lookup": r'kallsyms_lookup_name\("update_ddl_hit_history"\)',
+                "module name guard": r'strcmp\(mod->name,\s*"oplus_bsp_sched_assist"\)',
+                "module-load hook": r"hook_sched_assist_module\(mod\);",
+                "ARM64 text patch": r"aarch64_insn_patch_text_nosync",
+            }
+            for label, pattern in required.items():
+                hits = len(re.findall(pattern, source))
+                if hits != 1:
+                    raise SystemExit(f"::error::ddl_hit_hook semantic check failed: {label}, expected 1 match, got {hits}")
+            if "ddl_hit_hook: update_ddl_hit_history patched" not in source:
+                raise SystemExit("::error::ddl_hit_hook success log marker missing")
+            print("✓ ddl_hit_hook.patch semantic verification passed (PID bounds, target symbol, module guard, ARM64 hook)")
+            PYDDL
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
             patch -p1 -F 3 < ntsync_base.patch || true
@@ -810,7 +881,7 @@ jobs:
 
           # SUSFS 配置前置门禁：在耗时的 Image 编译前确认 Kconfig 确实识别了所有选项。
           if [[ "${{ github.event.inputs.susfs_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
-            for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
+            for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER; do
               if ! grep -q "^${sym}=y$" out/.config; then
                 echo "::error::gki_defconfig 后 ${sym}=y 未生效；停止编译以避免生成不含完整 SUSFS 的内核"
                 grep -E "^(CONFIG_KSU_SUSFS|# CONFIG_KSU_SUSFS)" out/.config || true
@@ -840,7 +911,7 @@ jobs:
           fi
           echo "===== 校验最终 SUSFS .config ====="
           fail=0
-          for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS ; do
+          for sym in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER ; do
             line=$(grep -E "^${sym}=" "$CONFIG" || true)
             if [[ "$line" != "${sym}=y" ]]; then
               echo "::error::${sym} 未以 =y 编入最终 .config（实际值: '${line:-未找到}'）"
@@ -928,6 +999,10 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+            echo "SUSFS Branch: ${SUSFS_BRANCH}" >> ./ak3.log
+            echo "SUSFS Commit: ${SUSFS_COMMIT}" >> ./ak3.log
+          fi
           if [[ "${{ github.event.inputs.ksu_type }}" == "sukisu" ]]; then
             echo "SukiSU Branch: ${SUKISU_BRANCH}" >> ./ak3.log
             echo "SukiSU Commit: ${SUKISU_COMMIT}" >> ./ak3.log
@@ -1027,13 +1102,14 @@ jobs:
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
-          - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
+          - SukiSU-Nova管理器下载：[SukiSU-Nova](https://github.com/SukiSU-Nova/SukiSU-Nova/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
-          - SukiSU 官方提交：${{ needs.build.outputs.sukisu_commit }}
+          - SukiSU-Nova 官方提交：${{ needs.build.outputs.sukisu_commit }}
+          - SUSFS 官方提交：${{ needs.build.outputs.susfs_commit }}
           - SukiSU 勾选 SUSFS 时使用官方 builtin 集成分支并启用 ARM64 branch-link hook；关闭时使用官方 main 分支。
           
           ### 📋 安装方法 | Installation Guide
