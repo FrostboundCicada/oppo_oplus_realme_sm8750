@@ -145,6 +145,23 @@ jobs:
           rm -rf build-tools.zip &
           
           wait
+          # 修正 Linux 6.6 libbpf 在当前 C23/glibc 环境下的 const 指针兼容性。
+          python3 - <<'PYLIBBPF'
+          from pathlib import Path
+          import re
+          p = Path("common/tools/lib/bpf/libbpf.c")
+          if not p.is_file():
+              raise SystemExit("::error::未找到 tools/lib/bpf/libbpf.c")
+          s = p.read_text()
+          pattern = r"(?m)^(\s*)char \*next_path;(?=\n\s*int seg_len;)"
+          s2, n = re.subn(pattern, r"\1const char *next_path;", s)
+          if n != 1:
+              raise SystemExit(f"::error::libbpf next_path 修正目标应恰好匹配 1 处，实际 {n} 处")
+          p.write_text(s2)
+          if not re.search(r"(?m)^\s*const char \*next_path;(?=\n\s*int seg_len;)", p.read_text()):
+              raise SystemExit("::error::libbpf const 指针修正复核失败")
+          print("✓ libbpf C23 const 指针兼容修正已应用并复核")
+          PYLIBBPF
           echo "所有源码及llvm-Clang18工具链初始化完成！"
           echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
           rm common/android/abi_gki_protected_exports_* || true
